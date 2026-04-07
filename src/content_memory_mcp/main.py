@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 
+from .http_server import serve_http
 from .server import serve_forever
 
 
@@ -24,11 +25,27 @@ def _load_env_file(path: str | None) -> None:
             os.environ[key] = value
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="content-memory-mcp stdio server")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="content-memory-mcp server")
     parser.add_argument("--env-file", dest="env_file", default=os.getenv("CONTENT_MEMORY_MCP_ENV_FILE", ""))
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("stdio", help="以 stdio 方式运行 MCP server")
+
+    http_parser = subparsers.add_parser("serve-http", help="以 Streamable HTTP 方式运行 MCP server")
+    http_parser.add_argument("--host", default=os.getenv("CONTENT_MEMORY_MCP_HTTP_HOST", "127.0.0.1"))
+    http_parser.add_argument("--port", type=int, default=int(os.getenv("CONTENT_MEMORY_MCP_HTTP_PORT", "5335")))
+    http_parser.add_argument("--log-level", default=os.getenv("CONTENT_MEMORY_MCP_HTTP_LOG_LEVEL", "info"))
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     _load_env_file(args.env_file or None)
+    command = args.command or os.getenv("CONTENT_MEMORY_MCP_TRANSPORT", "stdio").strip().lower()
+    if command == "serve-http":
+        return serve_http(host=args.host, port=args.port, log_level=args.log_level)
     return serve_forever()
 
 

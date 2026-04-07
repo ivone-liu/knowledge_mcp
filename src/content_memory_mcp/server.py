@@ -72,7 +72,7 @@ class ContentMemoryMCPServer:
                     },
                     "serverInfo": {
                         "name": "content-memory-mcp",
-                        "version": "1.0.0",
+                        "version": "1.1.0",
                         "description": "Unified MCP server for notes, WeChat corpora, and Qdrant-backed RAG retrieval.",
                     },
                     "instructions": "Use tools for writes, retrieval, and RAG context assembly. Use resources for quick snapshots and prompts for explicit workflows.",

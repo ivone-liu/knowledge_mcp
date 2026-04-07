@@ -2,25 +2,43 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
+import requests
 
-def send(proc, payload):
-    proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    proc.stdin.flush()
-    line = proc.stdout.readline().strip()
-    if not line:
-        raise RuntimeError(proc.stderr.read())
-    return json.loads(line)
+
+def _free_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _wait_ready(base_url: str, timeout: float = 20.0) -> None:
+    last = None
+    for _ in range(int(timeout * 10)):
+        try:
+            res = requests.get(f"{base_url}/healthz", timeout=1)
+            if res.status_code == 200:
+                return
+            last = RuntimeError(f"health status={res.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+        time.sleep(0.1)
+    raise RuntimeError(f"HTTP 服务未就绪: {last}")
 
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="content-memory-smoke-") as tmp:
         tmp_path = Path(tmp)
+        port = _free_port()
         env = os.environ.copy()
         env["PYTHONPATH"] = str(root / "src")
         env["CONTENT_MEMORY_MCP_NOTES_ROOT"] = str(tmp_path / "notes")
@@ -29,38 +47,73 @@ def main() -> int:
         env["CONTENT_MEMORY_MCP_QDRANT_PATH"] = str(tmp_path / "qdrant")
         env["CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER"] = "mock"
         env["CONTENT_MEMORY_MCP_MOCK_DIM"] = "96"
+        env["CONTENT_MEMORY_MCP_HTTP_HOST"] = "127.0.0.1"
+        env["CONTENT_MEMORY_MCP_HTTP_PORT"] = str(port)
         proc = subprocess.Popen(
-            [sys.executable, "-m", "content_memory_mcp.main"],
-            stdin=subprocess.PIPE,
+            [sys.executable, "-m", "content_memory_mcp.main", "serve-http", "--host", "127.0.0.1", "--port", str(port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=env,
         )
         try:
-            init = send(
-                proc,
-                {
+            base_url = f"http://127.0.0.1:{port}"
+            _wait_ready(base_url)
+            headers = {"Accept": "application/json, text/event-stream"}
+            init = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
-                    "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "installer", "version": "1.0"}},
+                    "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "installer", "version": "1.1"}},
                 },
+                timeout=5,
             )
-            if init["result"]["serverInfo"]["version"] != "1.0.0":
+            init.raise_for_status()
+            session_id = init.headers.get("Mcp-Session-Id")
+            if not session_id:
+                raise RuntimeError("初始化未返回 Mcp-Session-Id")
+            payload = init.json()
+            if payload["result"]["serverInfo"]["version"] != "1.1.0":
                 raise RuntimeError("服务器版本不正确")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
-            add = send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "notes.add", "arguments": {"text": "安装自检笔记"}}})
-            if not add["result"]["structuredContent"]["ok"]:
+            headers["Mcp-Session-Id"] = session_id
+            notify = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                timeout=5,
+            )
+            if notify.status_code != 202:
+                raise RuntimeError(f"initialized notification 异常: {notify.status_code}")
+            add = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "notes.add", "arguments": {"text": "安装自检笔记"}}},
+                timeout=10,
+            )
+            add.raise_for_status()
+            add_payload = add.json()
+            if not add_payload["result"]["structuredContent"]["ok"]:
                 raise RuntimeError("notes.add 失败")
-            search = send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "notes.search", "arguments": {"query": "自检"}}})
-            hits = search["result"]["structuredContent"].get("hits") or []
+            search = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "notes.search", "arguments": {"query": "自检"}}},
+                timeout=10,
+            )
+            search.raise_for_status()
+            hits = search.json()["result"]["structuredContent"].get("hits") or []
             if not hits:
                 raise RuntimeError("notes.search 未返回结果")
             return 0
         finally:
-            proc.kill()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
 
 
 if __name__ == "__main__":

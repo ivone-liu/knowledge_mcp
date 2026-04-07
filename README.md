@@ -1,30 +1,35 @@
 # content-memory-mcp
 
-`content-memory-mcp` 是一个围绕“长期内容资产”构建的 Python MCP Server。它把两类原本分散在 skill 里的能力，收敛成一套稳定、可测试、可扩展的接口层：
+`content-memory-mcp` 是一个面向 **长期内容资产** 的 Python MCP 服务。它把两类原本散落在 skill 里的能力收拢成一套稳定的远程接口：
 
 - **长期笔记与知识沉淀**，对应 `notes.*`
 - **公众号文章抓取、归档、检索与语料复用**，对应 `weixin.*`
 
-项目的核心目标不是做一个普通 CRUD 服务，而是做一个**可直接用于 RAG 的内容中台**：
+这个项目不是普通 CRUD 服务，也不是只会搜文件的壳。它的定位是一个 **Qdrant 驱动的 RAG 内容中台**：
 
 - 原始内容保存在本地主库，便于回溯、导出、重建索引
 - 向量索引写入 Qdrant，负责高效召回
-- Embedding 服务负责把文本转成可检索的语义向量
-- MCP Tools / Resources / Prompts 负责把这些能力标准化暴露给宿主
+- Embedding 服务负责把文本转成语义向量
+- MCP Tools / Resources / Prompts 负责把这些能力标准化暴露给 ChatGPT 或其他 MCP 客户端
 
-这意味着它既能做“保存一条笔记”这种基础动作，也能做“围绕一个主题召回上下文，再给模型回答”这种 RAG 场景。
+当前版本同时支持两种传输：
+
+- **stdio**，适合本地客户端与测试
+- **Streamable HTTP**，适合通过域名反向代理后给 ChatGPT 远程接入
+
+默认启动脚本 `start.sh` 走的是 **HTTP 模式**，绑定 `127.0.0.1:5335`。
 
 ---
 
 ## 这个项目解决什么问题
 
-很多内容系统都会踩进两个坑。
+很多内容系统会掉进两个坑。
 
-第一个坑是**内容存了，但用不起来**。笔记散在 JSON、Markdown、网页抓取结果里，真正要找时只能全文扫文件。
+第一个坑是 **内容存了，但用不起来**。笔记散在 JSON、Markdown、网页抓取结果里，真正要找时只能全文件扫描。
 
-第二个坑是**检索做了，但主库丢了**。只剩向量库和摘要，原始内容不完整，后续一换模型或切块策略就要重建一切。
+第二个坑是 **检索做了，但主库丢了**。只剩向量库和摘要，原始内容不完整，一换模型或切块策略就得全量重建。
 
-这个项目的设计思路就是把这两件事拆开：
+这个项目的思路就是把这两件事拆开：
 
 - **主库负责保存原文**
 - **Qdrant 负责向量索引与召回**
@@ -34,17 +39,21 @@
 
 ---
 
-## 项目整体架构
+## 整体架构
 
 ```text
-自然语言 / MCP 客户端
+ChatGPT / 其他 MCP 客户端
         │
         ▼
-MCP 协议层
+远程 MCP 协议层
+(Streamable HTTP / stdio)
+        │
+        ▼
+MCP 服务层
 (Tools / Resources / Prompts)
         │
         ▼
-服务层
+业务服务层
 (NotesService / WeixinService)
         │
         ├── 主库存储层
@@ -60,9 +69,10 @@ MCP 协议层
             └── 文档级聚合与轻量重排
 ```
 
-这套分层里，每一层都只做自己该做的事：
+这套分层里，每一层只做自己该做的事：
 
-- **MCP 层** 负责协议与接口，不负责业务细节
+- **远程/本地传输层** 负责 MCP 通道，不负责业务逻辑
+- **MCP 层** 负责协议和工具暴露
 - **服务层** 负责业务语义与输入输出统一
 - **主库层** 负责真相源
 - **RAG 层** 负责检索能力
@@ -86,7 +96,7 @@ MCP 更适合承载：
 - 可读取的结构化资源
 - 可复用的标准化 prompt 入口
 
-所以这个项目没有试图把旧 skill 一比一搬运，而是把 skill 背后的**可执行能力**标准化。结果就是：
+所以这个项目没有试图把旧 skill 一比一搬运，而是把 skill 背后的 **可执行能力** 标准化。结果就是：
 
 - 笔记写入可以直接调 `notes.add`
 - 笔记 RAG 上下文可以直接调 `notes.retrieve_context`
@@ -107,6 +117,8 @@ content-memory-mcp/
 ├── install.sh
 ├── start.sh
 ├── docker-compose.qdrant.yml
+├── deploy/
+│   └── nginx.content-memory-mcp.conf.example
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-dev.txt
@@ -116,6 +128,7 @@ content-memory-mcp/
 │   ├── __init__.py
 │   ├── main.py
 │   ├── server.py
+│   ├── http_server.py
 │   ├── tooling.py
 │   ├── resources.py
 │   ├── prompts.py
@@ -131,6 +144,7 @@ content-memory-mcp/
 └── tests/
     ├── conftest.py
     ├── test_mcp_stdio.py
+    ├── test_mcp_http.py
     ├── test_notes_service.py
     ├── test_rag_provider.py
     └── test_weixin_service.py
@@ -138,7 +152,8 @@ content-memory-mcp/
 
 可以粗暴地理解成：
 
-- `server.py` 是协议入口
+- `server.py` 是 stdio 协议入口
+- `http_server.py` 是远程 HTTP MCP 壳层
 - `tooling.py` 是工具注册表
 - `services/` 是业务层
 - `rag.py` 是检索中枢
@@ -149,7 +164,7 @@ content-memory-mcp/
 
 ## 数据模型与存储策略
 
-### 1. Notes
+### Notes
 
 Notes 侧继承的是“长期记忆”那套思路：
 
@@ -161,11 +176,11 @@ Notes 侧继承的是“长期记忆”那套思路：
 
 - `CONTENT_MEMORY_MCP_NOTES_ROOT`
 
-默认示例路径是：
+默认示例路径：
 
 - `~/.openclaw/workspace/agent-memory`
 
-### 2. Weixin
+### Weixin
 
 Weixin 侧保留了公众号抓取的原始结构：
 
@@ -180,25 +195,20 @@ Weixin 侧保留了公众号抓取的原始结构：
 
 - `CONTENT_MEMORY_MCP_WEIXIN_ROOT`
 
-默认示例路径是：
+默认示例路径：
 
 - `~/.openclaw/data/mp_weixin`
 
-### 3. Qdrant
+### Qdrant
 
-Qdrant 不是主库，只是**索引层**。
+Qdrant 不是主库，只是 **索引层**。
 
 当前默认按大来源拆成两个 collection：
 
 - `content_memory_notes_chunks`
 - `content_memory_weixin_chunks`
 
-这样做是为了把 notes 和 weixin 这两类语料隔开，因为它们的：
-
-- 来源不同
-- payload 结构不同
-- 写入链路不同
-- 检索使用场景不同
+这样做是为了把 notes 和 weixin 这两类语料隔开，因为它们的来源、payload 结构、写入链路和检索场景都不同。
 
 但它们并没有继续按“产品 / UI / 商业 / 故事”拆成四五个 collection。对这类主题分类，更合理的做法通常是：
 
@@ -213,7 +223,7 @@ Qdrant 不是主库，只是**索引层**。
 
 ### 写入链路
 
-#### Notes 写入
+#### Notes
 
 1. 调用 `notes.add` 或 `notes.update`
 2. 写入 JSONL 主库
@@ -222,7 +232,7 @@ Qdrant 不是主库，只是**索引层**。
 5. 调用 Embedding Provider 生成向量
 6. 把 chunk 向量和 payload 写入 Qdrant
 
-#### Weixin 写入
+#### Weixin
 
 1. 调用 `weixin.fetch_article` 或 `weixin.batch_fetch`
 2. 抓取文章并落盘到 markdown/html/json/meta
@@ -241,46 +251,28 @@ Qdrant 不是主库，只是**索引层**。
 这两个接口会：
 
 1. 先把 query 做 embedding
-2. 去 Qdrant 召回最相关 chunks
+2. 去 Qdrant 召回最相关 chunk
 3. 再按文档聚合
-4. 结合轻量 lexical score 做排序
-5. 返回“文档级结果 + top chunks”
+4. 返回文档级 hits，并附带命中的 top chunks
 
-#### 上下文检索
+#### RAG 上下文检索
 
 - `notes.retrieve_context`
 - `weixin.retrieve_context`
 
-这两个接口直接返回 chunk 级上下文，适合给后续模型做：
-
-- 回答问题
-- 提炼摘要
-- 生成选题
-- 风格分析
-- 二次创作
-
-### 为什么保留 lexical score
-
-因为纯向量召回对一些场景不够稳，尤其是：
-
-- 实体名
-- 标题词
-- 短 query
-- 强关键词约束
-
-所以当前实现保留了一层轻量 lexical score，作为低成本稳态增强，而不是盲信“全向量就一定更聪明”。
+这两个接口直接返回 chunk 级内容，适合再喂给模型生成答案、摘要、选题、结构草稿。
 
 ---
 
-## 当前支持的 MCP 能力
+## MCP 能力总览
 
 ### Tools
 
-#### system
+系统工具：
 
 - `system.health`
 
-#### notes
+Notes：
 
 - `notes.add`
 - `notes.list_today`
@@ -293,7 +285,7 @@ Qdrant 不是主库，只是**索引层**。
 - `notes.update`
 - `notes.rebuild_index`
 
-#### weixin
+Weixin：
 
 - `weixin.fetch_article`
 - `weixin.batch_fetch`
@@ -308,224 +300,188 @@ Qdrant 不是主库，只是**索引层**。
 
 ### Resources
 
-固定资源：
+典型资源 URI：
 
 - `content-memory://overview`
-- `content-memory://system/health`
 - `content-memory://notes/today`
-- `content-memory://weixin/accounts`
-
-资源模板：
-
 - `content-memory://notes/date/{date}`
 - `content-memory://notes/record/{id}`
+- `content-memory://weixin/accounts`
 - `content-memory://weixin/account/{account_slug}`
 - `content-memory://weixin/article/{account_slug}/{uid}`
 
 ### Prompts
 
-- `capture_note`
-- `find_notes`
-- `ask_notes_rag`
-- `archive_weixin_article`
-- `ask_weixin_rag`
-
-Prompts 的作用不是代替工具，而是给宿主一个更自然的任务入口。
+Prompts 提供显式工作流入口，比如围绕 notes 或 weixin 的 RAG 提问模板。
 
 ---
 
-## 配置方式
+## 安装
 
-项目通过 `.env` 控制主库、Qdrant 和 embedding。
-
-### 主库路径
+### 1. 一键安装
 
 ```bash
-CONTENT_MEMORY_MCP_NOTES_ROOT=~/.openclaw/workspace/agent-memory
-CONTENT_MEMORY_MCP_WEIXIN_ROOT=~/.openclaw/data/mp_weixin
-```
-
-### Qdrant 配置
-
-```bash
-CONTENT_MEMORY_MCP_QDRANT_MODE=server
-CONTENT_MEMORY_MCP_QDRANT_URL=http://127.0.0.1:6333
-CONTENT_MEMORY_MCP_QDRANT_API_KEY=
-CONTENT_MEMORY_MCP_QDRANT_COLLECTION_PREFIX=content_memory
-CONTENT_MEMORY_MCP_QDRANT_TIMEOUT=10
-CONTENT_MEMORY_MCP_RESET_ON_DIMENSION_MISMATCH=false
-```
-
-### RAG 切块参数
-
-```bash
-CONTENT_MEMORY_MCP_RAG_CHUNK_SIZE=500
-CONTENT_MEMORY_MCP_RAG_CHUNK_OVERLAP=80
-```
-
-### Embedding 配置
-
-```bash
-CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER=openai
-CONTENT_MEMORY_MCP_EMBEDDING_BASE_URL=https://your-embedding-endpoint/v1
-CONTENT_MEMORY_MCP_EMBEDDING_API_KEY=replace_me
-CONTENT_MEMORY_MCP_EMBEDDING_MODEL=text-embedding-3-small
-CONTENT_MEMORY_MCP_EMBEDDING_DIMENSIONS=1536
-CONTENT_MEMORY_MCP_EMBEDDING_TIMEOUT=20
-CONTENT_MEMORY_MCP_EMBEDDING_RETRIES=3
-CONTENT_MEMORY_MCP_EMBEDDING_RETRY_BACKOFF_SECONDS=1.2
-CONTENT_MEMORY_MCP_EMBEDDING_MAX_BATCH_TEXTS=64
-```
-
-正式环境应该直接使用真实 embedding。测试和安装自检里会使用 mock provider，但那只是为了让离线验证稳定，不应该当成正式方案。
-
----
-
-## 安装与启动
-
-### 一键安装
-
-在项目根目录执行：
-
-```bash
+chmod +x install.sh
 ./install.sh
 ```
 
 安装脚本会做这些事：
 
-1. 检查 Python 版本是否满足 3.9+
-2. 创建 `.venv`
-3. 安装运行依赖和测试依赖
-4. 依据依赖指纹判断是否需要重复安装
-5. 自动生成 `.env`
-6. 若未配置外部 Qdrant，则启动本地 Docker Qdrant
-7. 运行离线 smoke 测试，验证安装结果
+- 检查 Python 版本
+- 创建 `.venv`
+- 安装项目依赖
+- 如果 `.env` 不存在则自动生成
+- 检查或启动本地 Qdrant 容器
+- 跑一次离线 smoke 测试
 
-脚本是幂等的，已安装且依赖未变化时会跳过重复安装。
+安装脚本有“已安装跳过”逻辑：
 
-### 启动服务
+- 如果 `.venv` 已存在
+- 且依赖指纹没有变化
+- 且当前安装版本匹配
+
+就不会重复安装依赖。
+
+### 2. 配置 `.env`
+
+把 `.env.example` 复制成 `.env` 后，至少补齐这些：
 
 ```bash
+CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER=openai
+CONTENT_MEMORY_MCP_EMBEDDING_BASE_URL=https://your-embedding-endpoint/v1
+CONTENT_MEMORY_MCP_EMBEDDING_API_KEY=your_api_key
+CONTENT_MEMORY_MCP_EMBEDDING_MODEL=text-embedding-3-small
+CONTENT_MEMORY_MCP_EMBEDDING_DIMENSIONS=1536
+```
+
+如果你想让服务监听固定本地端口 5335，默认已经是：
+
+```bash
+CONTENT_MEMORY_MCP_HTTP_HOST=127.0.0.1
+CONTENT_MEMORY_MCP_HTTP_PORT=5335
+CONTENT_MEMORY_MCP_HTTP_MCP_PATH=/mcp
+CONTENT_MEMORY_MCP_HTTP_HEALTH_PATH=/healthz
+```
+
+---
+
+## 启动
+
+```bash
+chmod +x start.sh
 ./start.sh
 ```
 
-也可以直接执行：
+`start.sh` 默认会启动 **Streamable HTTP MCP 服务**，绑定：
+
+- `127.0.0.1:5335`
+
+可用接口：
+
+- MCP endpoint: `http://127.0.0.1:5335/mcp`
+- Health endpoint: `http://127.0.0.1:5335/healthz`
+
+如果你只是本地调试 stdio，也可以直接运行：
 
 ```bash
-.venv/bin/content-memory-mcp --env-file /absolute/path/to/.env
+.venv/bin/content-memory-mcp --env-file .env stdio
 ```
-
-`main.py` 当前支持 `--env-file` 参数，会在服务启动前把对应环境变量加载进进程。
 
 ---
 
-## 如何接入 MCP 客户端
+## 域名与反向代理
 
-这是一个 **stdio MCP server**。适合本地 MCP 客户端、本地代理或支持 stdio 的宿主。
+ChatGPT 只能接 **remote MCP server**，不能直接连接本地 stdio 服务。所以你必须把本地的 5335 端口通过 HTTPS 域名暴露出来。
 
-通用配置方式如下：
+项目已经附了 Nginx 示例：
 
-```json
-{
-  "mcpServers": {
-    "content-memory": {
-      "command": "/absolute/path/to/content-memory-mcp/.venv/bin/content-memory-mcp",
-      "args": [
-        "--env-file",
-        "/absolute/path/to/content-memory-mcp/.env"
-      ]
-    }
-  }
-}
-```
+- `deploy/nginx.content-memory-mcp.conf.example`
 
-如果你的客户端不方便传参，也可以直接把命令指向：
+推荐映射：
 
-```bash
-/absolute/path/to/content-memory-mcp/start.sh
-```
+- `https://mcp.yourdomain.com/mcp` -> `http://127.0.0.1:5335/mcp`
+- `https://mcp.yourdomain.com/healthz` -> `http://127.0.0.1:5335/healthz`
 
-这套项目当前聚焦的是本地 stdio 形态。要接 ChatGPT 这类需要 remote MCP 的宿主，还需要额外做一层远程化部署，这不在当前代码内。
+如果你用 Cloudflare Tunnel、ngrok 或自建反代，原则也是一样：
+
+- 对外一定要是 HTTPS
+- MCP 入口路径建议固定成 `/mcp`
+- 健康检查路径建议固定成 `/healthz`
 
 ---
 
-## 怎么使用这个项目
+## 在 ChatGPT 里怎么接
 
-这个项目最常见的使用方式有三类。
+1. 先把服务通过域名暴露成 HTTPS
+2. 在 ChatGPT 开启 Developer mode
+3. 进入 Apps / Connectors 设置页
+4. 创建一个 app，填入你的远程 MCP 地址，例如：
 
-### 1. 记录与沉淀
+```text
+https://mcp.yourdomain.com/mcp
+```
 
-- 用 `notes.add` 写入会议纪要、产品灵感、故事片段、商业思考
-- 用 `notes.list_today` 或 `notes.list_by_date` 查看记录
-- 用 `notes.update` 修订内容
+连接后，在 ChatGPT 对话里不是用 slash command，而是通过自然语言或显式点名 app/tool 来调用。
 
-### 2. 检索与提炼
+例如：
 
-- 用 `notes.search` 找相关笔记
-- 用 `notes.extract` 做简单提炼
-- 用 `notes.retrieve_context` 直接拿 chunk 级上下文给模型做问答或总结
-
-### 3. 公众号语料归档与复用
-
-- 用 `weixin.fetch_article` 抓单篇文章
-- 用 `weixin.batch_fetch` 批量抓取
-- 用 `weixin.search_articles` 搜索语料
-- 用 `weixin.retrieve_context` 做公众号知识 RAG
-- 用 `weixin.rebuild_index` 为历史文章重建向量索引
-
-如果你关心的是“按产品/UI/商业/故事拆视角”，建议先通过 notes 的 `library / tags / category` 来做过滤，而不是一开始把 Qdrant collection 拆得过细。
+- “使用 content-memory 的 `notes.add` 工具，记录这条产品想法……”
+- “使用 content-memory 搜索我最近关于 RAG 的笔记”
+- “使用 content-memory 抓取这篇公众号文章并建立索引……”
 
 ---
 
-## 可靠性与测试
+## 测试与可靠性
 
-这个项目不是只写了 happy path。
+当前测试覆盖：
 
-当前测试覆盖包括：
-
-- Notes 写入、检索、上下文召回
-- Weixin 抓取、落盘、索引、检索
-- MCP stdio initialize / tools / resources / prompts
-- OpenAI 兼容 embedding provider 的请求格式、批处理和 dimensions 参数
-- Qdrant collection 维度不一致时的显式报错
+- Notes 写入 / 检索 / RAG 上下文
+- Weixin 抓取 / 检索 / RAG 上下文
+- MCP stdio 初始化与工具调用
+- MCP HTTP 初始化、session header、工具调用、资源读取
+- OpenAI 兼容 embedding 请求格式
+- collection 维度不一致时报错保护
 
 运行测试：
 
 ```bash
-source .venv/bin/activate
-pytest -q
+.venv/bin/python -m pytest -q
 ```
 
-### 可靠性设计要点
+安装脚本还会跑一次离线 smoke 测试，验证：
 
-- **主库和索引分离**：Qdrant 出问题时，原始内容仍然在
-- **安装幂等**：重复执行 `install.sh` 不会无脑重装
-- **维度保护**：embedding 维度和 collection 不一致时会直接报错
-- **可重建索引**：notes / weixin 都支持 `rebuild_index`
-
-这套设计的重点不是“永不出错”，而是**出错时不要把数据和索引一起拖死**。
+- HTTP 服务能起来
+- initialize 能返回 `Mcp-Session-Id`
+- `notes.add` 正常
+- `notes.search` 正常
 
 ---
 
 ## 设计边界
 
-这个项目当前明确不做几件事：
+这个项目有几个边界是故意保留的：
 
-1. 不把 Qdrant 当主库
-2. 不把所有主题都拆成独立 collection
-3. 不把原 skill 的完整提示词编排原样迁入 MCP
-4. 不内置远程部署层
-5. 不做复杂的多 agent 编排系统
-
-这些不是缺陷，而是刻意收住的边界。项目先把“内容保存、索引、召回、标准化调用”这条主干打稳，后面再扩。
+1. **Qdrant 不是主库**。原文仍然存本地。
+2. **notes 和 weixin 分 collection**，但 notes 内部默认不乱拆 collection。
+3. **embedding 与向量库分离**。向量由 embedding 服务生成，不让 Qdrant 承担不该承担的职责。
+4. **默认保留写工具**。这意味着公网暴露时你应该自己决定是否通过反向代理、网络 ACL 或后续 OAuth 做额外保护。
 
 ---
 
-## 进一步阅读
+## 后续演进方向
 
-- `project.md`：更偏架构和设计原则
-- `src/content_memory_mcp/rag.py`：RAG、Qdrant、embedding 的核心实现
-- `src/content_memory_mcp/services/`：notes 与 weixin 的业务层
-- `tests/`：当前可用能力的回归测试
+后面最值得做的事情，不是继续堆功能，而是把下面几项逐步补强：
 
-如果你只看一个文件来理解整体，请先看 `project.md`；如果你要动实现，请先看 `rag.py` 和 `services/`。
+- 给 notes 增加更细的 metadata 过滤维度
+- 给 weixin 增加更强的账号级/主题级重排
+- 增加 remote MCP 的认证层
+- 增加面向 ChatGPT 的更清晰 tool 描述与只读视图
+- 在保持主库不动的前提下，支持重建不同 embedding 模型的索引
+
+---
+
+## 相关文件
+
+- `project.md`：偏架构与设计说明
+- `README.md`：偏项目说明与使用手册
+- `deploy/nginx.content-memory-mcp.conf.example`：反向代理示例

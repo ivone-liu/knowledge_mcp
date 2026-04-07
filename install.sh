@@ -92,7 +92,7 @@ PY
 )"
   fi
 
-  if [[ -d "${VENV_DIR}" ]] && [[ "${installed_version}" == "${current_fingerprint}" ]] && [[ "${current_version}" == "1.0.0" ]]; then
+  if [[ -d "${VENV_DIR}" ]] && [[ "${installed_version}" == "${current_fingerprint}" ]] && [[ "${current_version}" == "1.1.0" ]]; then
     log "Python 依赖已安装且指纹未变化，跳过安装"
     return 0
   fi
@@ -164,7 +164,9 @@ main() {
 下一步：
 1. 编辑当前目录下的 .env，填写真实 embedding 服务地址和 API Key。
 2. 启动服务：./start.sh
-3. 在 MCP 客户端中把命令指向：/当前目录/.venv/bin/content-memory-mcp --env-file /当前目录/.env
+3. 启动后本地监听 127.0.0.1:5335（可在 .env 覆盖）。
+4. 反向代理你的域名到 /mcp -> 127.0.0.1:5335/mcp，/healthz -> 127.0.0.1:5335/healthz。
+5. 在 ChatGPT 开发者模式里把远程 MCP 地址填成你的 HTTPS 域名 + /mcp
 EOF
 }
 

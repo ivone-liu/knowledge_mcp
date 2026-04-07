@@ -36,7 +36,7 @@
    优先复用原有 `~/.openclaw/workspace/agent-memory` 与 `~/.openclaw/data/mp_weixin` 目录，减少迁移成本。
 
 5. **对宿主保持中立**  
-   当前实现是 Python stdio MCP server，未来可迁移到 remote MCP，不锁死在单一客户端。
+   当前实现同时支持 Python stdio MCP 与 Streamable HTTP MCP，可本地调试，也可经域名反向代理后供 ChatGPT 远程接入。
 
 ### 2.2 非目标
 
@@ -120,7 +120,12 @@ MCP 更适合承载的是 **可复用、可契约化、可测试的能力原语*
 
 ### 4.1 接口层
 
-接口层由 MCP 协议承载，当前实现包括：
+接口层由 MCP 协议承载，当前实现包括两种传输壳：
+
+- `server.py` 提供 stdio 传输
+- `http_server.py` 提供 Streamable HTTP 传输
+
+在此之上暴露统一的 MCP 能力，包括：
 
 - **Tools**：面向自动调用和显式调用的可执行动作
 - **Resources**：面向读取的结构化资源入口

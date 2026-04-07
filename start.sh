@@ -5,4 +5,6 @@ if [[ ! -x "${ROOT_DIR}/.venv/bin/content-memory-mcp" ]]; then
   echo "请先执行 ./install.sh" >&2
   exit 1
 fi
-exec "${ROOT_DIR}/.venv/bin/content-memory-mcp" --env-file "${ROOT_DIR}/.env"
+export CONTENT_MEMORY_MCP_HTTP_HOST="${CONTENT_MEMORY_MCP_HTTP_HOST:-127.0.0.1}"
+export CONTENT_MEMORY_MCP_HTTP_PORT="${CONTENT_MEMORY_MCP_HTTP_PORT:-5335}"
+exec "${ROOT_DIR}/.venv/bin/content-memory-mcp" --env-file "${ROOT_DIR}/.env" serve-http --host "${CONTENT_MEMORY_MCP_HTTP_HOST}" --port "${CONTENT_MEMORY_MCP_HTTP_PORT}"
