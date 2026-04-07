@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "content-memory-mcp"
+version = "1.0.0"
+description = "Unified MCP server for WeChat corpus ingestion and long-term notes"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.0",
+  "qdrant-client>=1.9.0"
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+content-memory-mcp = "content_memory_mcp.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
