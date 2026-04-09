@@ -23,6 +23,35 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
     return data
 
 
+def _weixin_save_props() -> dict[str, Any]:
+    return {
+        "save_html": {"type": "boolean", "description": "是否保存 HTML 原文"},
+        "save_json_meta": {"type": "boolean", "description": "是否保存 JSON 元数据"},
+        "save_markdown": {"type": "boolean", "description": "是否保存 Markdown，建议保持开启"},
+    }
+
+
+def _history_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": "与 WeSpy history 配置兼容的对象，如 biz、referer、cookie_header、query_params、headers、max_pages、max_articles 等。",
+        "properties": {
+            "biz": {"type": "string"},
+            "referer": {"type": "string"},
+            "cookie_header": {"type": "string"},
+            "user_agent": {"type": "string"},
+            "offset": {"type": "integer"},
+            "count": {"type": "integer"},
+            "max_pages": {"type": "integer"},
+            "max_articles": {"type": "integer"},
+            "headers": {"type": "object", "additionalProperties": True},
+            "query_params": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["biz"],
+        "additionalProperties": True,
+    }
+
+
 def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
     return {
         "system.health": {
@@ -98,16 +127,40 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
             "handler": lambda args: ctx.notes.rebuild_index(library=args.get("library")),
         },
         "weixin.fetch_article": {
-            "title": "抓取公众号文章",
-            "description": "按文章 URL 抓取一篇公众号文章，落盘后同步写入 Qdrant 文章索引。",
-            "inputSchema": _schema({"url": {"type": "string"}, "account_name": {"type": "string"}, "account_slug": {"type": "string"}, "rebuild_kb": {"type": "boolean"}}, ["url"]),
-            "handler": lambda args: ctx.weixin.fetch_article(url=args["url"], account_name=args.get("account_name", ""), account_slug=args.get("account_slug", ""), rebuild_kb=bool(args.get("rebuild_kb", True))),
+            "title": "抓取公众号单篇文章",
+            "description": "按文章 URL 抓取一篇公众号文章，支持 HTML/JSON/Markdown 输出控制，并同步写入 Qdrant 文章索引。",
+            "inputSchema": _schema({"url": {"type": "string"}, "account_name": {"type": "string"}, "account_slug": {"type": "string"}, "rebuild_kb": {"type": "boolean"}, **_weixin_save_props()}, ["url"]),
+            "handler": lambda args: ctx.weixin.fetch_article(url=args["url"], account_name=args.get("account_name", ""), account_slug=args.get("account_slug", ""), save_html=args.get("save_html"), save_json_meta=args.get("save_json_meta"), save_markdown=args.get("save_markdown"), rebuild_kb=bool(args.get("rebuild_kb", True))),
+        },
+        "weixin.list_album_articles": {
+            "title": "列出专辑文章清单",
+            "description": "读取微信专辑文章列表但不下载正文，等价于 WeSpy 的 --album-only。",
+            "inputSchema": _schema({"album_url": {"type": "string"}, "max_articles": {"type": "integer", "minimum": 1}}, ["album_url"]),
+            "handler": lambda args: ctx.weixin.list_album_articles(album_url=args["album_url"], max_articles=args.get("max_articles")),
+        },
+        "weixin.fetch_album": {
+            "title": "抓取公众号专辑",
+            "description": "按专辑 URL 批量抓取公众号文章，支持限制数量与输出格式，能力对齐 WeSpy 专辑批量下载。",
+            "inputSchema": _schema({"album_url": {"type": "string"}, "account_name": {"type": "string"}, "account_slug": {"type": "string"}, "max_articles": {"type": "integer", "minimum": 1}, "request_interval_seconds": {"type": "number", "minimum": 0}, "rebuild_kb": {"type": "boolean"}, **_weixin_save_props()}, ["album_url", "account_name"]),
+            "handler": lambda args: ctx.weixin.fetch_album(album_url=args["album_url"], account_name=args["account_name"], account_slug=args.get("account_slug", ""), max_articles=args.get("max_articles"), save_html=args.get("save_html"), save_json_meta=args.get("save_json_meta"), save_markdown=args.get("save_markdown"), rebuild_kb=bool(args.get("rebuild_kb", True)), request_interval_seconds=args.get("request_interval_seconds")),
+        },
+        "weixin.list_history_articles": {
+            "title": "列出历史消息清单",
+            "description": "按 history 配置读取公众号历史消息列表但不下载正文。",
+            "inputSchema": _schema({"history": _history_schema()}, ["history"]),
+            "handler": lambda args: ctx.weixin.list_history_articles(history=args["history"]),
+        },
+        "weixin.fetch_history": {
+            "title": "抓取公众号历史消息",
+            "description": "按 history 配置批量抓取公众号历史消息，支持 cookie_header、headers、query_params 和输出格式控制。",
+            "inputSchema": _schema({"history": _history_schema(), "account_name": {"type": "string"}, "account_slug": {"type": "string"}, "request_interval_seconds": {"type": "number", "minimum": 0}, "rebuild_kb": {"type": "boolean"}, **_weixin_save_props()}, ["history", "account_name"]),
+            "handler": lambda args: ctx.weixin.fetch_history(history=args["history"], account_name=args["account_name"], account_slug=args.get("account_slug", ""), save_html=args.get("save_html"), save_json_meta=args.get("save_json_meta"), save_markdown=args.get("save_markdown"), rebuild_kb=bool(args.get("rebuild_kb", True)), request_interval_seconds=args.get("request_interval_seconds")),
         },
         "weixin.batch_fetch": {
             "title": "批量抓取公众号",
-            "description": "按 manifest 批量抓取公众号文章，并顺手重建文章向量索引。",
-            "inputSchema": _schema({"manifest_path": {"type": "string"}, "account_slug": {"type": "string"}, "rebuild_kb": {"type": "boolean"}}, ["manifest_path"]),
-            "handler": lambda args: ctx.weixin.batch_fetch(manifest_path=args["manifest_path"], account_slug=args.get("account_slug", ""), rebuild_kb=bool(args.get("rebuild_kb", True))),
+            "description": "按 manifest 批量抓取公众号文章，并顺手重建文章向量索引。支持配置输出格式。",
+            "inputSchema": _schema({"manifest_path": {"type": "string"}, "account_slug": {"type": "string"}, "rebuild_kb": {"type": "boolean"}, **_weixin_save_props()}, ["manifest_path"]),
+            "handler": lambda args: ctx.weixin.batch_fetch(manifest_path=args["manifest_path"], account_slug=args.get("account_slug", ""), save_html=args.get("save_html"), save_json_meta=args.get("save_json_meta"), save_markdown=args.get("save_markdown"), rebuild_kb=bool(args.get("rebuild_kb", True))),
         },
         "weixin.list_accounts": {
             "title": "查看公众号索引",
@@ -141,7 +194,7 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
         },
         "weixin.get_article": {
             "title": "读取公众号文章",
-            "description": "按 account_slug 和 uid 读取单篇归档文章正文。",
+            "description": "按 account_slug 和 uid 读取单篇归档文章正文，以及可选 HTML/JSON 归档结果。",
             "inputSchema": _schema({"account_slug": {"type": "string"}, "uid": {"type": "string"}}, ["account_slug", "uid"]),
             "handler": lambda args: ctx.weixin.get_article(account_slug=args["account_slug"], uid=args["uid"]),
         },

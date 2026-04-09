@@ -87,6 +87,26 @@ class FetchError(RuntimeError):
     """抓取异常。"""
 
 
+
+
+def coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(part for part in (coerce_text(item) for item in value) if part)
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(value)
+    return str(value)
+
 def now_ts() -> int:
     return int(time.time())
 
@@ -99,8 +119,8 @@ def today_date_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def normalize_date_string(value: str) -> str:
-    raw = (value or "").strip()
+def normalize_date_string(value: Any) -> str:
+    raw = coerce_text(value).strip()
     if not raw:
         return ""
     match = re.search(r"(\d{4})[年/\-.](\d{1,2})[月/\-.](\d{1,2})", raw)
@@ -129,8 +149,8 @@ def unique_items(values: Sequence[Any]) -> List[Any]:
     return result
 
 
-def slugify(text: str, fallback: str = "unknown-account") -> str:
-    text = (text or "").strip()
+def slugify(text: Any, fallback: str = "unknown-account") -> str:
+    text = coerce_text(text).strip()
     if not text:
         return fallback
     text = re.sub(r"\s+", "-", text)
@@ -139,8 +159,8 @@ def slugify(text: str, fallback: str = "unknown-account") -> str:
     return text[:80] or fallback
 
 
-def safe_filename(text: str, fallback: str = "untitled") -> str:
-    text = (text or "").strip()
+def safe_filename(text: Any, fallback: str = "untitled") -> str:
+    text = coerce_text(text).strip()
     if not text:
         text = fallback
     text = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", text)
@@ -169,8 +189,8 @@ def read_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def canonicalize_url(url: str) -> str:
-    url = html.unescape((url or "").strip())
+def canonicalize_url(url: Any) -> str:
+    url = html.unescape(coerce_text(url).strip())
     url = url.replace("#wechat_redirect", "").replace("#rd", "")
     url = url.replace("http://", "https://", 1)
     parsed = urlparse(url)
@@ -222,7 +242,8 @@ def get_proxy_image_url(original_url: str) -> str:
     return base_url
 
 
-def html_to_markdown(html_content: str) -> str:
+def html_to_markdown(html_content: Any) -> str:
+    html_content = coerce_text(html_content)
     if not html_content:
         return ""
     soup = BeautifulSoup(html_content, "html.parser")
@@ -233,7 +254,7 @@ def _html_to_markdown_recursive(element: Any) -> str:
     markdown = ""
     for child in getattr(element, "children", []):
         if getattr(child, "name", None) is None:
-            text = str(child)
+            text = coerce_text(child)
             text = re.sub(r"\s+", " ", text)
             if text.strip():
                 markdown += text
@@ -858,8 +879,15 @@ class MPWeixinCorpusBuilder:
             "account_info": account_info,
         }
         if not skip_kb:
-            kb = KnowledgeBaseBuilder(self.root).build_account_kb(account_slug)
-            result["kb"] = kb
+            try:
+                kb = KnowledgeBaseBuilder(self.root).build_account_kb(account_slug)
+                result["kb"] = kb
+            except Exception as exc:
+                result.setdefault("warnings", []).append({
+                    "stage": "build_account_kb",
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                })
         return result
 
     def get_account_info(self, account_slug: str) -> Dict[str, Any]:
@@ -1140,9 +1168,17 @@ class MPWeixinCorpusBuilder:
         write_json(report_path, report)
 
         if rebuild_kb:
-            kb_result = KnowledgeBaseBuilder(self.root).build_account_kb(account_slug)
-            report["kb"] = kb_result
-            KnowledgeBaseBuilder(self.root).build_global_kb()
+            try:
+                kb_builder = KnowledgeBaseBuilder(self.root)
+                kb_result = kb_builder.build_account_kb(account_slug)
+                report["kb"] = kb_result
+                report["global_kb"] = kb_builder.build_global_kb()
+            except Exception as exc:
+                report.setdefault("warnings", []).append({
+                    "stage": "rebuild_kb",
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                })
 
         return report
 
@@ -1202,14 +1238,14 @@ class KnowledgeBaseBuilder:
         counts = {key: 0 for key in TITLE_FORMULA_PATTERNS}
         for title in titles:
             for label, pattern in TITLE_FORMULA_PATTERNS.items():
-                if pattern.search(title):
+                if pattern.search(coerce_text(title)):
                     counts[label] += 1
         return counts
 
     def _classify_paragraphs(self, paragraphs: Sequence[str], patterns: Dict[str, re.Pattern[str]]) -> Dict[str, int]:
         counts = {key: 0 for key in patterns}
         for text in paragraphs:
-            value = (text or "").strip()
+            value = coerce_text(text).strip()
             if not value:
                 continue
             matched = False
@@ -1226,7 +1262,7 @@ class KnowledgeBaseBuilder:
     def _extract_cjk_ngrams(self, texts: Sequence[str], n_values: Sequence[int] = (2, 3, 4), topn: int = 30) -> List[Tuple[str, int]]:
         counter: Counter[str] = Counter()
         for text in texts:
-            clean = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "")
+            clean = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", coerce_text(text))
             if len(clean) < 2:
                 continue
             for n in n_values:
@@ -1250,10 +1286,11 @@ class KnowledgeBaseBuilder:
         paragraph_counts = []
 
         for body in bodies:
-            header_counts.append(len(re.findall(r"^#{1,6}\s", body, flags=re.MULTILINE)))
-            list_counts.append(len(re.findall(r"^(?:- |\d+\.)", body, flags=re.MULTILINE)))
-            bold_counts.append(len(re.findall(r"\*\*.+?\*\*", body)))
-            paragraph_counts.append(len([p for p in re.split(r"\n\s*\n", body) if p.strip()]))
+            value = coerce_text(body)
+            header_counts.append(len(re.findall(r"^#{1,6}\s", value, flags=re.MULTILINE)))
+            list_counts.append(len(re.findall(r"^(?:- |\d+\.)", value, flags=re.MULTILINE)))
+            bold_counts.append(len(re.findall(r"\*\*.+?\*\*", value)))
+            paragraph_counts.append(len([p for p in re.split(r"\n\s*\n", value) if p.strip()]))
 
         def avg(values: Sequence[int]) -> float:
             return round(sum(values) / len(values), 2) if values else 0.0
@@ -1270,7 +1307,7 @@ class KnowledgeBaseBuilder:
         counter: Dict[str, int] = {key: 0 for key in CTA_PATTERNS}
         for text in endings:
             for name, pattern in CTA_PATTERNS.items():
-                if pattern.search(text or ""):
+                if pattern.search(coerce_text(text)):
                     counter[name] += 1
         return counter
 
@@ -1286,22 +1323,22 @@ class KnowledgeBaseBuilder:
         )
         return [
             {
-                "title": item.get("title", ""),
-                "publish_time": item.get("publish_time", ""),
-                "url": item.get("url", ""),
-                "first_paragraph": item.get("first_paragraph", "")[:300],
+                "title": coerce_text(item.get("title", "")),
+                "publish_time": coerce_text(item.get("publish_time", "")),
+                "url": coerce_text(item.get("url", "")),
+                "first_paragraph": coerce_text(item.get("first_paragraph", ""))[:300],
             }
             for item in scored[:limit]
         ]
 
-    def _split_paragraphs(self, text: str) -> List[str]:
-        return [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    def _split_paragraphs(self, text: Any) -> List[str]:
+        return [p.strip() for p in re.split(r"\n\s*\n", coerce_text(text)) if p.strip()]
 
-    def _split_sentences(self, text: str) -> List[str]:
-        raw = re.split(r"(?<=[。！？!?；;])\s+|\n+", text or "")
+    def _split_sentences(self, text: Any) -> List[str]:
+        raw = re.split(r"(?<=[。！？!?；;])\s+|\n+", coerce_text(text))
         sentences = []
         for item in raw:
-            item = re.sub(r"\s+", " ", item or "").strip()
+            item = re.sub(r"\s+", " ", coerce_text(item)).strip()
             if not item:
                 continue
             if len(item) < 6:
@@ -1309,12 +1346,12 @@ class KnowledgeBaseBuilder:
             sentences.append(item)
         return sentences
 
-    def _trim(self, text: str, limit: int = 180) -> str:
-        value = re.sub(r"\s+", " ", text or "").strip()
+    def _trim(self, text: Any, limit: int = 180) -> str:
+        value = re.sub(r"\s+", " ", coerce_text(text)).strip()
         return value[:limit] + ("…" if len(value) > limit else "")
 
     def _pick_reasoning_type(self, text: str) -> str:
-        value = text or ""
+        value = coerce_text(text)
         if re.search(r"(不是.+而是|表面上|实际上|你以为|其实|相反)", value):
             return "对比反差"
         if re.search(r"(因为|所以|导致|本质上|根源|意味着)", value):
@@ -1328,7 +1365,7 @@ class KnowledgeBaseBuilder:
         return "观点展开"
 
     def _score_sentence(self, sentence: str, keywords: Sequence[str]) -> int:
-        value = sentence or ""
+        value = coerce_text(sentence)
         score = min(len(value), 40)
         cue_patterns = [
             r"(先说结论|结论|核心|本质|关键|真正|问题在于|我的判断|答案是)",
@@ -1370,7 +1407,7 @@ class KnowledgeBaseBuilder:
         return unique
 
     def _extract_citations(self, article: Dict[str, Any]) -> Dict[str, Any]:
-        content_html = article.get("content_html") or article.get("html_content") or ""
+        content_html = coerce_text(article.get("content_html") or article.get("html_content") or "")
         soup = BeautifulSoup(content_html, "html.parser") if content_html else BeautifulSoup("", "html.parser")
         links = []
         seen_urls = set()
@@ -1392,7 +1429,7 @@ class KnowledgeBaseBuilder:
                 }
             )
 
-        body = article.get("body", "")
+        body = coerce_text(article.get("body", ""))
         mention_pattern = re.compile(
             r"(根据[^，。；\n]{0,50}|来自[^，。；\n]{0,50}|引用[^，。；\n]{0,50}|《[^》]{1,40}》|[^，。；\n]{0,30}(国家统计局|国家卫健委|卫健委|国务院|工信部|教育部|世界卫生组织|WHO|QuestMobile|艾瑞|麦肯锡|哈佛|清华|北大)[^，。；\n]{0,30})"
         )
@@ -1440,9 +1477,9 @@ class KnowledgeBaseBuilder:
         }
 
     def _extract_core_viewpoint(self, article: Dict[str, Any], keywords: Sequence[str]) -> Dict[str, Any]:
-        title = article.get("title", "")
-        first_paragraph = article.get("first_paragraph", "")
-        body = article.get("body", "")
+        title = coerce_text(article.get("title", ""))
+        first_paragraph = coerce_text(article.get("first_paragraph", ""))
+        body = coerce_text(article.get("body", ""))
         candidates = []
         if title:
             candidates.append(title)
@@ -1488,13 +1525,13 @@ class KnowledgeBaseBuilder:
         return picked
 
     def _extract_subpoints(self, article: Dict[str, Any], keywords: Sequence[str], limit: int = 5) -> List[Dict[str, str]]:
-        paragraphs = article.get("paragraphs") or []
+        paragraphs = [coerce_text(p) for p in (article.get("paragraphs") or [])]
         results = []
         seen = set()
         for para in paragraphs:
             if len(results) >= limit:
                 break
-            if not re.search(r"(第一|第二|第三|一是|二是|三是|另外|同时|还有|比如|例如|这意味着|换句话说|更重要的是)", para):
+            if not re.search(r"(第一|第二|第三|一是|二是|三是|另外|同时|还有|比如|例如|这意味着|换句话说|更重要的是)", coerce_text(para)):
                 continue
             sentence = self._pick_key_sentences(para, keywords, limit=1)
             statement = sentence[0] if sentence else para
@@ -1512,11 +1549,11 @@ class KnowledgeBaseBuilder:
         return results
 
     def _extract_devices(self, article: Dict[str, Any], citations: Dict[str, Any]) -> List[Dict[str, str]]:
-        title = article.get("title", "")
-        first_paragraph = article.get("first_paragraph", "")
-        last_paragraph = article.get("last_paragraph", "")
-        body = article.get("body", "")
-        paragraphs = article.get("paragraphs") or []
+        title = coerce_text(article.get("title", ""))
+        first_paragraph = coerce_text(article.get("first_paragraph", ""))
+        last_paragraph = coerce_text(article.get("last_paragraph", ""))
+        body = coerce_text(article.get("body", ""))
+        paragraphs = [coerce_text(p) for p in (article.get("paragraphs") or [])]
         devices: List[Dict[str, str]] = []
 
         def add(name: str, evidence: str, why: str, effect: str) -> None:

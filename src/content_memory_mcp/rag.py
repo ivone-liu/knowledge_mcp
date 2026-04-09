@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -24,12 +25,31 @@ from qdrant_client.models import (
 DEFAULT_DIMENSIONS = 1536
 
 
-def _normalize_text(text: str) -> str:
-    return " ".join((text or "").replace("\r", " ").replace("\n", " ").split())
+def coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(part for part in (coerce_text(item) for item in value) if part)
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(value)
+    return str(value)
 
 
-def _tokenize(text: str) -> list[str]:
-    text = (text or "").lower()
+def _normalize_text(text: Any) -> str:
+    return " ".join(coerce_text(text).replace("\r", " ").replace("\n", " ").split())
+
+
+def _tokenize(text: Any) -> list[str]:
+    text = coerce_text(text).lower()
     out: list[str] = []
     buf: list[str] = []
     for ch in text:
@@ -92,8 +112,8 @@ def chunk_text(text: str, *, size: int = 500, overlap: int = 80) -> list[str]:
     return deduped
 
 
-def markdown_to_plain_text(text: str) -> str:
-    value = text or ""
+def markdown_to_plain_text(text: Any) -> str:
+    value = coerce_text(text)
     value = re.sub(r"```.*?```", " ", value, flags=re.S)
     value = re.sub(r"`([^`]*)`", r"\1", value)
     value = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", value)

@@ -228,9 +228,9 @@ weixin 继续沿用文章落盘结构：
 
 #### Weixin 写入链路
 
-1. 调用 `weixin.fetch_article` / `weixin.batch_fetch`
-2. 抓取文章并落盘到主库
-3. 读取 markdown 正文并转纯文本
+1. 调用 `weixin.fetch_article` / `weixin.fetch_album` / `weixin.fetch_history` / `weixin.batch_fetch`
+2. 按单篇、专辑、历史消息或 manifest 批量抓取文章并落盘到主库
+3. 优先读取 markdown；若未保存 markdown，则回退读取 json/html 并转纯文本
 4. 切 chunk
 5. 调用 embedding 服务生成向量
 6. 写入 Qdrant
@@ -330,6 +330,10 @@ Qdrant 适合承担以下职责：
 - `/notes-fetch` → `notes.search`
 - `/notes-extract` → `notes.extract`
 - `/weixin-fetch` → `weixin.fetch_article`
+- `wespy --album-only` → `weixin.list_album_articles`
+- `wespy <album_url>` → `weixin.fetch_album`
+- `history list` → `weixin.list_history_articles`
+- `history fetch` → `weixin.fetch_history`
 - `/weixin-search` → `weixin.search_articles`
 
 这样做的原因是：

@@ -217,6 +217,16 @@ Qdrant 不是主库，只是 **索引层**。
 
 这比一上来把库拆成碎玻璃更稳。
 
+### 稳定性策略
+
+这个项目把“抓取/保存”和“后处理”分开看待。
+
+- **抓取成功并完成落盘** 不应该因为后续的 KB 构建或 RAG 重建失败而被整体判成失败
+- 后处理异常会以下面的形式返回：`warnings`
+- 只有真正的抓取失败、参数错误或主库存储失败，才会返回错误
+
+这能避免一种很恶心的情况：文章其实已经入库了，但客户端只收到 `ok=false`，误以为整次操作失败。
+
 ---
 
 ## RAG 是怎么工作的
@@ -234,8 +244,8 @@ Qdrant 不是主库，只是 **索引层**。
 
 #### Weixin
 
-1. 调用 `weixin.fetch_article` 或 `weixin.batch_fetch`
-2. 抓取文章并落盘到 markdown/html/json/meta
+1. 调用 `weixin.fetch_article`、`weixin.fetch_album`、`weixin.fetch_history` 或 `weixin.batch_fetch`
+2. 按单篇、专辑、历史消息或 manifest 批量抓取文章并落盘到 markdown/html/json/meta
 3. 读取正文并纯文本化
 4. 切 chunk
 5. 调用 Embedding Provider 生成向量
@@ -261,6 +271,14 @@ Qdrant 不是主库，只是 **索引层**。
 - `weixin.retrieve_context`
 
 这两个接口直接返回 chunk 级内容，适合再喂给模型生成答案、摘要、选题、结构草稿。
+
+补充一点，weixin 域现在已经对齐 WeSpy 的几类核心能力：
+
+- 单篇抓取
+- 专辑列表读取，相当于 `--album-only`
+- 专辑批量抓取，支持 `max_articles`
+- 历史消息列表读取与批量抓取
+- HTML / JSON / Markdown 输出开关
 
 ---
 
@@ -288,6 +306,10 @@ Notes：
 Weixin：
 
 - `weixin.fetch_article`
+- `weixin.list_album_articles`
+- `weixin.fetch_album`
+- `weixin.list_history_articles`
+- `weixin.fetch_history`
 - `weixin.batch_fetch`
 - `weixin.list_accounts`
 - `weixin.get_account_info`

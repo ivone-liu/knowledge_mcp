@@ -51,6 +51,9 @@ def test_mcp_stdio_roundtrip(temp_roots):
         tool_names = {tool["name"] for tool in tools["result"]["tools"]}
         assert "notes.retrieve_context" in tool_names
         assert "weixin.fetch_article" in tool_names
+        assert "weixin.fetch_album" in tool_names
+        assert "weixin.list_album_articles" in tool_names
+        assert "weixin.fetch_history" in tool_names
         assert "system.health" in tool_names
 
         add = send(
