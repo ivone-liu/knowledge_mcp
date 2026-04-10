@@ -76,7 +76,7 @@ def main() -> int:
             if not session_id:
                 raise RuntimeError("初始化未返回 Mcp-Session-Id")
             payload = init.json()
-            if payload["result"]["serverInfo"]["version"] != "1.1.2":
+            if payload["result"]["serverInfo"]["version"] != "1.2.0.post1":
                 raise RuntimeError("服务器版本不正确")
             headers["Mcp-Session-Id"] = session_id
             notify = requests.post(

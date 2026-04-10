@@ -92,7 +92,7 @@ PY
 )"
   fi
 
-  if [[ -d "${VENV_DIR}" ]] && [[ "${installed_version}" == "${current_fingerprint}" ]] && [[ "${current_version}" == "1.1.2" ]]; then
+  if [[ -d "${VENV_DIR}" ]] && [[ "${installed_version}" == "${current_fingerprint}" ]] && [[ "${current_version}" == "1.2.0" ]]; then
     log "Python 依赖已安装且指纹未变化，跳过安装"
     return 0
   fi

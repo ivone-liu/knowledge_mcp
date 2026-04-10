@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "content-memory-mcp"
-version = "1.1.2"
+version = "1.2.0.post1"
 description = "Unified MCP server for WeChat corpus ingestion and long-term notes"
 readme = "README.md"
 requires-python = ">=3.9"

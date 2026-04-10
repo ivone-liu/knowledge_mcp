@@ -18,6 +18,23 @@ from ..vendor.weixin_lib import (
 )
 
 
+PUBLIC_PATH_KEYS = {
+    'local_markdown_path',
+    'local_html_path',
+    'local_json_path',
+    'kb_dir',
+    'style_profile',
+    'style_playbook',
+    'fulltext_analysis',
+    'account_info',
+    'article_registry',
+    'latest_report_path',
+    'meta_path',
+    'markdown_path',
+    'json_path',
+}
+
+
 class WeixinService:
     def __init__(self, root: Path, rag: QdrantRAG | None = None):
         self.root = Path(root)
@@ -48,6 +65,40 @@ class WeixinService:
         if not any(options.values()):
             raise ValueError("save_html、save_json_meta、save_markdown 不能同时为 false")
         return options
+
+    def _resource_uri_for_row(self, row: dict[str, Any]) -> str:
+        return f"content-memory://weixin/article/{row.get('account_slug')}/{row.get('uid')}"
+
+    def _summarize_saved(self, saved: Any) -> dict[str, bool]:
+        if not isinstance(saved, dict):
+            return {}
+        return {
+            'markdown': bool(saved.get('markdown')),
+            'html': bool(saved.get('html')),
+            'json': bool(saved.get('json')),
+        }
+
+    def _sanitize_public(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in value.items():
+                if key in PUBLIC_PATH_KEYS:
+                    continue
+                if key == 'saved':
+                    out['saved'] = self._summarize_saved(item)
+                    continue
+                if key == 'view_options' and isinstance(item, dict):
+                    original_url = item.get('original_url')
+                    if original_url:
+                        out[key] = {'original_url': original_url}
+                    continue
+                out[key] = self._sanitize_public(item)
+            return out
+        if isinstance(value, list):
+            return [self._sanitize_public(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        return value
 
     def _row_source_text(self, row: dict[str, Any]) -> str:
         md_raw = coerce_text(row.get("local_markdown_path")).strip()
@@ -215,6 +266,9 @@ class WeixinService:
             warnings.extend(payload["rag_reindex"]["warnings"])
         if warnings:
             payload["warnings"] = warnings[:20]
+        payload = self._sanitize_public(payload)
+        payload['article_count'] = int((payload.get('report') or {}).get('success_count') or 0)
+        payload['kb_dirty'] = bool(rebuild_kb)
         return payload
 
     def fetch_article(
@@ -249,6 +303,12 @@ class WeixinService:
             registry = self.store.load_article_registry(slug)
             row = next((item for item in registry if item.get("url") == target_url), registry[0] if registry else None)
             if row:
+                result['article'] = {
+                    'uid': row.get('uid'),
+                    'title': row.get('title'),
+                    'url': row.get('url'),
+                    'resource_uri': self._resource_uri_for_row(row),
+                }
                 try:
                     result["rag"] = self._index_article_row(row)
                 except Exception as exc:  # noqa: BLE001
@@ -259,6 +319,9 @@ class WeixinService:
                         "error": type(exc).__name__,
                         "message": str(exc),
                     })
+        result = self._sanitize_public(result)
+        result.setdefault('ok', result.get('status') == 'ok')
+        result['kb_dirty'] = bool(rebuild_kb)
         return result
 
     def list_album_articles(self, *, album_url: str, max_articles: int | None = None) -> dict[str, Any]:
@@ -309,7 +372,9 @@ class WeixinService:
             rebuild_kb=rebuild_kb,
             request_interval_seconds=request_interval_seconds,
         )
-        return {"action": "weixin.fetch_album", "album_url": canonicalize_url(album_url), **payload}
+        result = {"action": "weixin.fetch_album", "album_url": canonicalize_url(album_url), **payload}
+        result['kb_dirty'] = bool(rebuild_kb)
+        return self._sanitize_public(result)
 
     def list_history_articles(self, *, history: dict[str, Any]) -> dict[str, Any]:
         rows = self.builder.fetch_history_urls(history)
@@ -349,7 +414,9 @@ class WeixinService:
             rebuild_kb=rebuild_kb,
             request_interval_seconds=request_interval_seconds,
         )
-        return {"action": "weixin.fetch_history", **payload}
+        result = {"action": "weixin.fetch_history", **payload}
+        result['kb_dirty'] = bool(rebuild_kb)
+        return self._sanitize_public(result)
 
     def batch_fetch(
         self,
@@ -391,26 +458,31 @@ class WeixinService:
         reindex_results = []
         for slug in dict.fromkeys(touched_slugs):
             reindex_results.append(self._reindex_slug(slug))
-        return {
+        payload = {
             "ok": True,
             "action": "weixin.batch_fetch",
             "count": len(results),
             "save_options": save_opts,
             "results": results,
             "rag_reindex": reindex_results,
+            'account_slugs': list(dict.fromkeys(touched_slugs)),
+            'kb_dirty': bool(rebuild_kb),
         }
+        return self._sanitize_public(payload)
 
     def list_accounts(self, *, account_slug: str = "") -> dict[str, Any]:
         data = self.builder.list_account_index(account_slug=account_slug)
-        return {"ok": True, "action": "weixin.list_accounts", **data}
+        return self._sanitize_public({"ok": True, "action": "weixin.list_accounts", **data})
 
     def get_account_info(self, *, account_slug: str) -> dict[str, Any]:
         info = self.builder.get_account_info(account_slug)
-        return {"ok": True, "action": "weixin.get_account_info", "account": info}
+        return self._sanitize_public({"ok": True, "action": "weixin.get_account_info", "account": info})
 
     def list_arrivals(self, *, account_slug: str = "", date: str = "", by: str = "fetched_at", limit: int = 50) -> dict[str, Any]:
         data = self.builder.list_arrivals(account_slug=account_slug, date=date, by=by, limit=limit)
-        return {"ok": True, "action": "weixin.list_arrivals", **data}
+        for item in data.get('items', []):
+            item['resource_uri'] = f"content-memory://weixin/article/{item.get('account_slug')}/{item.get('uid')}" if item.get('uid') else ''
+        return self._sanitize_public({"ok": True, "action": "weixin.list_arrivals", **data})
 
     def rebuild_kb(self, *, account_slug: str = "", rebuild_all: bool = False) -> dict[str, Any]:
         kb = KnowledgeBaseBuilder(self.root)
@@ -419,12 +491,12 @@ class WeixinService:
             for slug in self.store.all_account_slugs():
                 results.append(kb.build_account_kb(slug))
             global_result = kb.build_global_kb()
-            return {"ok": True, "action": "weixin.rebuild_kb", "results": results, "global": global_result}
+            return self._sanitize_public({"ok": True, "action": "weixin.rebuild_kb", "results": results, "global": global_result})
         if not account_slug:
             raise ValueError("account_slug 不能为空，除非 rebuild_all=true")
         result = kb.build_account_kb(account_slug)
         kb.build_global_kb()
-        return {"ok": True, "action": "weixin.rebuild_kb", "result": result}
+        return self._sanitize_public({"ok": True, "action": "weixin.rebuild_kb", "result": result})
 
     def search_articles(self, *, query: str, account_slug: str = "", limit: int = 8) -> dict[str, Any]:
         filters = {"account_slug": account_slug} if account_slug else None
@@ -497,16 +569,18 @@ class WeixinService:
                 json_raw = (item.get("local_json_path") or "").strip()
                 json_path = Path(json_raw) if json_raw else None
                 content_json = read_json(json_path, {}) if json_path and json_path.is_file() else {}
-                return {
+                article = {
+                    **item,
+                    'resource_uri': self._resource_uri_for_row(item),
+                    "content_markdown": content_markdown,
+                    "content_html": content_html,
+                    "content_json": content_json,
+                }
+                return self._sanitize_public({
                     "ok": True,
                     "action": "weixin.get_article",
-                    "article": {
-                        **item,
-                        "content_markdown": content_markdown,
-                        "content_html": content_html,
-                        "content_json": content_json,
-                    },
-                }
+                    "article": article,
+                })
         return {"ok": False, "action": "weixin.get_article", "error": "article_not_found", "account_slug": account_slug, "uid": uid}
 
     def rebuild_index(self, *, account_slug: str = "", rebuild_all: bool = False) -> dict[str, Any]:
@@ -518,7 +592,7 @@ class WeixinService:
             if not slug:
                 continue
             results.append(self._reindex_slug(slug))
-        return {"ok": True, "action": "weixin.rebuild_index", "results": results}
+        return self._sanitize_public({"ok": True, "action": "weixin.rebuild_index", "results": results})
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "action": "weixin.health", "root": str(self.root), "rag": self.rag.health()}

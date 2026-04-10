@@ -92,7 +92,7 @@ def _build_json_response(payload: Any, *, status_code: int = 200, session_id: st
 
 def create_app(settings: HttpSettings | None = None) -> FastAPI:
     settings = settings or HttpSettings.from_env()
-    app = FastAPI(title="content-memory-mcp", version="1.1.2")
+    app = FastAPI(title="content-memory-mcp", version="1.2.0.post1")
     sessions = SessionManager()
 
     @app.get(settings.health_path)
