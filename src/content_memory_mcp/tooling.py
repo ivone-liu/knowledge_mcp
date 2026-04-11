@@ -4,10 +4,11 @@ import threading
 from typing import Any
 
 from .jobs import JobStore, JobStoreSettings
-from .paths import detect_articles_root, detect_notes_root, detect_qdrant_base_dir, detect_weixin_root
+from .paths import detect_articles_root, detect_notes_root, detect_qdrant_base_dir, detect_uploads_root, detect_weixin_root
 from .rag import QdrantRAG, RagSettings
 from .services.articles import ArticleService
 from .services.notes import NotesService
+from .services.uploads import UploadService
 from .services.weixin import WeixinService
 from .vendor.weixin_lib import slugify
 
@@ -21,6 +22,7 @@ class _SharedCore:
         self.rag = QdrantRAG(settings)
         self.notes = NotesService(detect_notes_root(), rag=self.rag)
         self.articles = ArticleService(detect_articles_root(), rag=self.rag)
+        self.uploads = UploadService(detect_uploads_root())
         self.weixin = WeixinService(detect_weixin_root(), rag=self.rag)
         jobs_root = self.weixin.root / '_jobs'
         _os = __import__('os')
@@ -124,6 +126,7 @@ class AppContext:
         self.rag = core.rag
         self.notes = core.notes
         self.articles = core.articles
+        self.uploads = core.uploads
         self.weixin = core.weixin
         self.jobs = core.jobs
 
@@ -187,6 +190,45 @@ def _enqueue_payload(action: str, payload: dict[str, Any], ctx: AppContext) -> d
     }
 
 
+def _resolve_upload(upload_id: str, ctx: AppContext) -> dict[str, Any]:
+    upload = ctx.uploads.get_internal(upload_id=upload_id)
+    if not upload:
+        raise KeyError(f'unknown upload: {upload_id}')
+    return upload
+
+
+def _upload_source_ref(upload: dict[str, Any]) -> str:
+    upload_id = (upload.get('id') or '').strip()
+    filename = (upload.get('filename') or '').strip() or 'upload.bin'
+    return f'upload:{upload_id}:{filename}'
+
+
+def _enqueue_article_file(args: dict[str, Any], ctx: AppContext) -> dict[str, Any]:
+    file_path = args.get('file_path')
+    upload_id = args.get('upload_id')
+    if file_path and upload_id:
+        raise ValueError('file_path 和 upload_id 只能二选一')
+    if not file_path and not upload_id:
+        raise ValueError('必须提供 file_path 或 upload_id 其中之一')
+    source_ref = args.get('source_ref')
+    if upload_id:
+        upload = _resolve_upload(str(upload_id), ctx)
+        file_path = upload['stored_path']
+        source_ref = source_ref or _upload_source_ref(upload)
+    response = _enqueue_payload('articles.ingest_file', {
+        'file_path': file_path,
+        'title': args.get('title'),
+        'summary': args.get('summary'),
+        'library': args.get('library', 'articles'),
+        'tags': args.get('tags'),
+        'source_ref': source_ref,
+        'author': args.get('author'),
+    }, ctx)
+    if upload_id:
+        response['upload_id'] = str(upload_id)
+    return response
+
+
 def _enqueue_article_import(file_kind: str, args: dict[str, Any], ctx: AppContext) -> dict[str, Any]:
     kind = file_kind.lower().lstrip('.')
     title = args.get('title')
@@ -197,9 +239,11 @@ def _enqueue_article_import(file_kind: str, args: dict[str, Any], ctx: AppContex
     author = args.get('author')
     file_path = args.get('file_path')
     content_base64 = args.get('content_base64')
+    upload_id = args.get('upload_id')
     filename = args.get('filename')
-    if file_path and content_base64:
-        raise ValueError('file_path 和 content_base64 只能二选一')
+    provided_inputs = [bool(file_path), bool(content_base64), bool(upload_id)]
+    if sum(1 for item in provided_inputs if item) > 1:
+        raise ValueError('file_path、content_base64、upload_id 只能三选一')
     if file_path:
         return _enqueue_payload('articles.ingest_file', {
             'file_path': file_path,
@@ -210,6 +254,19 @@ def _enqueue_article_import(file_kind: str, args: dict[str, Any], ctx: AppContex
             'source_ref': source_ref,
             'author': author,
         }, ctx)
+    if upload_id:
+        upload = _resolve_upload(str(upload_id), ctx)
+        response = _enqueue_payload('articles.ingest_file', {
+            'file_path': upload['stored_path'],
+            'title': title,
+            'summary': summary,
+            'library': library,
+            'tags': tags,
+            'source_ref': source_ref or _upload_source_ref(upload),
+            'author': author,
+        }, ctx)
+        response['upload_id'] = str(upload_id)
+        return response
     if content_base64:
         effective_filename = filename or f'upload.{kind}'
         if not str(effective_filename).lower().endswith(f'.{kind}'):
@@ -224,7 +281,7 @@ def _enqueue_article_import(file_kind: str, args: dict[str, Any], ctx: AppContex
             'source_ref': source_ref,
             'author': author,
         }, ctx)
-    raise ValueError('必须提供 file_path 或 content_base64 其中之一')
+    raise ValueError('必须提供 file_path、content_base64、upload_id 其中之一')
 
 
 def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
@@ -238,6 +295,7 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
                 'action': 'system.health',
                 'notes': ctx.notes.health(),
                 'articles': ctx.articles.health(),
+                'uploads': ctx.uploads.health(),
                 'weixin': ctx.weixin.health(),
                 'rag': ctx.rag.health(),
                 'jobs': ctx.jobs.health(),
@@ -260,6 +318,18 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
             'description': '取消尚未开始执行的任务。',
             'inputSchema': _schema({'job_id': {'type': 'string'}}, ['job_id']),
             'handler': lambda args: ctx.jobs.cancel(args['job_id']),
+        },
+        'uploads.get': {
+            'title': '查看上传文件',
+            'description': '按 upload_id 查看服务端已接收文件的元数据和推荐导入工具。',
+            'inputSchema': _schema({'upload_id': {'type': 'string'}}, ['upload_id']),
+            'handler': lambda args: ctx.uploads.get(upload_id=args['upload_id']),
+        },
+        'uploads.list_recent': {
+            'title': '查看最近上传',
+            'description': '列出最近通过 HTTP 上传入口接收的文件，便于后续用 upload_id 导入 articles。',
+            'inputSchema': _schema({'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}),
+            'handler': lambda args: ctx.uploads.list_recent(limit=int(args.get('limit', 20))),
         },
         'notes.add': {
             'title': '新增笔记',
@@ -329,17 +399,9 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
         },
         'articles.ingest_file': {
             'title': '排队导入本地文件为文章',
-            'description': '将服务器本地可访问的 PDF、EPUB、Markdown、TXT 或 HTML 文件导入为文章。适合本地部署场景。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}, ['file_path']),
-            'handler': lambda args: _enqueue_payload('articles.ingest_file', {
-                'file_path': args['file_path'],
-                'title': args.get('title'),
-                'summary': args.get('summary'),
-                'library': args.get('library', 'articles'),
-                'tags': args.get('tags'),
-                'source_ref': args.get('source_ref'),
-                'author': args.get('author'),
-            }, ctx),
+            'description': '将服务器本地文件或已上传文件导入为文章。支持 PDF、EPUB、Markdown、TXT、HTML。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'handler': lambda args: _enqueue_article_file(args, ctx),
         },
         'articles.ingest_base64': {
             'title': '排队导入 Base64 文件为文章',
@@ -358,20 +420,20 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
         },
         'articles.ingest_pdf': {
             'title': '导入 PDF 为文章',
-            'description': '显式导入 PDF 文档。可传服务器本地 file_path，或传 content_base64 + filename。适合把 PDF 归档到 articles，而不是 notes。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'description': '显式导入 PDF 文档。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('pdf', args, ctx),
         },
         'articles.ingest_epub': {
             'title': '导入 EPUB 为文章',
-            'description': '显式导入 EPUB 文档。可传服务器本地 file_path，或传 content_base64 + filename。适合电子书、长文合集归档。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'description': '显式导入 EPUB 文档。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('epub', args, ctx),
         },
         'articles.ingest_txt': {
             'title': '导入 TXT 为文章',
-            'description': '显式导入 TXT 文本文件。可传服务器本地 file_path，或传 content_base64 + filename。适合 OCR 结果、纯文本稿、整理后的长文。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'description': '显式导入 TXT 文本文件。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('txt', args, ctx),
         },
         'articles.list_recent': {

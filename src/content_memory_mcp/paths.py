@@ -48,3 +48,10 @@ def detect_articles_root() -> Path:
         return Path(explicit).expanduser().resolve()
 
     return _home_fallback(".openclaw", "data", "content_articles").resolve() if _home_fallback(".openclaw").exists() else _home_fallback(".content-memory-mcp", "content_articles").resolve()
+
+
+def detect_uploads_root() -> Path:
+    explicit = os.getenv("CONTENT_MEMORY_MCP_UPLOADS_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return (detect_articles_root() / "_uploads").resolve()

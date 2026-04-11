@@ -12,6 +12,12 @@ from pathlib import Path
 import requests
 
 
+def _session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
 def _free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -20,11 +26,11 @@ def _free_port() -> int:
     return port
 
 
-def _wait_ready(base_url: str, timeout: float = 20.0) -> None:
+def _wait_ready(base_url: str, session: requests.Session, timeout: float = 20.0) -> None:
     last = None
     for _ in range(int(timeout * 10)):
         try:
-            res = requests.get(f"{base_url}/healthz", timeout=1)
+            res = session.get(f"{base_url}/healthz", timeout=1)
             if res.status_code == 200:
                 return
             last = RuntimeError(f"health status={res.status_code}")
@@ -59,9 +65,10 @@ def main() -> int:
         )
         try:
             base_url = f"http://127.0.0.1:{port}"
-            _wait_ready(base_url)
+            session = _session()
+            _wait_ready(base_url, session)
             headers = {"Accept": "application/json, text/event-stream"}
-            init = requests.post(
+            init = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={
@@ -80,7 +87,7 @@ def main() -> int:
             if payload["result"]["serverInfo"]["version"] != "1.3.2":
                 raise RuntimeError("服务器版本不正确")
             headers["Mcp-Session-Id"] = session_id
-            notify = requests.post(
+            notify = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -88,7 +95,7 @@ def main() -> int:
             )
             if notify.status_code != 202:
                 raise RuntimeError(f"initialized notification 异常: {notify.status_code}")
-            tools = requests.post(
+            tools = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={"jsonrpc": "2.0", "id": 99, "method": "tools/list"},
@@ -97,6 +104,8 @@ def main() -> int:
             tools.raise_for_status()
             tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
             required_tools = {
+                "uploads.get",
+                "uploads.list_recent",
                 "articles.save_text",
                 "articles.ingest_pdf",
                 "articles.ingest_epub",
@@ -108,7 +117,7 @@ def main() -> int:
             missing = sorted(required_tools - tool_names)
             if missing:
                 raise RuntimeError(f"tools/list 缺少关键工具: {', '.join(missing)}")
-            add = requests.post(
+            add = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "notes.add", "arguments": {"text": "安装自检笔记"}}},
@@ -118,7 +127,7 @@ def main() -> int:
             add_payload = add.json()
             if not add_payload["result"]["structuredContent"]["ok"]:
                 raise RuntimeError("notes.add 失败")
-            search = requests.post(
+            search = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "notes.search", "arguments": {"query": "自检"}}},
@@ -128,7 +137,7 @@ def main() -> int:
             hits = search.json()["result"]["structuredContent"].get("hits") or []
             if not hits:
                 raise RuntimeError("notes.search 未返回结果")
-            article_add = requests.post(
+            article_add = session.post(
                 f"{base_url}/mcp",
                 headers=headers,
                 json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "articles.save_text", "arguments": {"text": "# 安装自检文章\n\n这是 PDF/EPUB 转文字后的归档内容。", "title": "安装自检文章"}}},
@@ -138,6 +147,39 @@ def main() -> int:
             article_payload = article_add.json()["result"]["structuredContent"]
             if not article_payload["ok"]:
                 raise RuntimeError("articles.save_text 失败")
+            upload = session.post(
+                f"{base_url}/uploads",
+                files={"file": ("install-smoke.txt", b"install smoke upload body", "text/plain")},
+                timeout=10,
+            )
+            upload.raise_for_status()
+            upload_payload = upload.json()
+            upload_id = upload_payload["upload"]["id"]
+            import_job = session.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "articles.ingest_txt", "arguments": {"upload_id": upload_id, "library": "smoke-uploads"}}},
+                timeout=10,
+            )
+            import_job.raise_for_status()
+            job_id = import_job.json()["result"]["structuredContent"]["job_id"]
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                status = session.post(
+                    f"{base_url}/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "jobs.get", "arguments": {"job_id": job_id}}},
+                    timeout=5,
+                )
+                status.raise_for_status()
+                status_payload = status.json()["result"]["structuredContent"]
+                if status_payload.get("status") in {"completed", "failed", "cancelled"}:
+                    if status_payload.get("status") != "completed":
+                        raise RuntimeError(f"上传导入任务失败: {status_payload}")
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("上传导入任务超时")
             return 0
         finally:
             proc.terminate()

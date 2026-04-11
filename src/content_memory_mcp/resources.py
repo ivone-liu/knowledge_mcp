@@ -36,6 +36,13 @@ RESOURCE_TEMPLATES = [
         'mimeType': 'application/json',
     },
     {
+        'name': 'uploads-item',
+        'title': '读取上传文件元数据',
+        'uriTemplate': 'content-memory://uploads/item/{upload_id}',
+        'description': '返回一个已上传文件的元数据和推荐导入工具。',
+        'mimeType': 'application/json',
+    },
+    {
         'name': 'job-status',
         'title': '读取任务状态',
         'uriTemplate': 'content-memory://jobs/{job_id}',
@@ -90,6 +97,13 @@ def list_resources(ctx: AppContext) -> list[dict[str, Any]]:
             'mimeType': 'application/json',
         },
         {
+            'uri': 'content-memory://uploads/recent',
+            'name': 'uploads-recent',
+            'title': '近期上传',
+            'description': '最近通过 HTTP 上传入口接收的文件。',
+            'mimeType': 'application/json',
+        },
+        {
             'uri': 'content-memory://weixin/accounts',
             'name': 'weixin-accounts',
             'title': '公众号账号索引',
@@ -111,6 +125,7 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
             {
                 'notes_root': str(ctx.notes.root),
                 'articles_root': str(ctx.articles.root),
+                'uploads_root': str(ctx.uploads.root),
                 'weixin_root': str(ctx.weixin.root),
                 'jobs_root': str(ctx.jobs.root),
                 'rag': ctx.rag.health(),
@@ -119,6 +134,8 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
                     'system.health',
                     'jobs.get',
                     'jobs.list',
+                    'uploads.get',
+                    'uploads.list_recent',
                     'articles.save_text',
                     'articles.ingest_file',
                     'articles.ingest_pdf',
@@ -140,6 +157,7 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
             {
                 'notes': ctx.notes.health(),
                 'articles': ctx.articles.health(),
+                'uploads': ctx.uploads.health(),
                 'weixin': ctx.weixin.health(),
                 'rag': ctx.rag.health(),
                 'jobs': ctx.jobs.health(),
@@ -151,6 +169,8 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
         text = json.dumps(ctx.notes.list_today(), ensure_ascii=False, indent=2)
     elif uri == 'content-memory://articles/recent':
         text = json.dumps(ctx.articles.list_recent(), ensure_ascii=False, indent=2)
+    elif uri == 'content-memory://uploads/recent':
+        text = json.dumps(ctx.uploads.list_recent(), ensure_ascii=False, indent=2)
     elif uri == 'content-memory://weixin/accounts':
         text = json.dumps(ctx.weixin.list_accounts(), ensure_ascii=False, indent=2)
     elif uri.startswith('content-memory://notes/date/'):
@@ -168,6 +188,9 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
         article = ctx.articles.get(article_id=article_id, library=library)
         mime = 'text/markdown'
         text = (article.get('article') or {}).get('content_markdown') or json.dumps(article, ensure_ascii=False, indent=2)
+    elif uri.startswith('content-memory://uploads/item/'):
+        upload_id = uri.split('content-memory://uploads/item/', 1)[1]
+        text = json.dumps(ctx.uploads.get(upload_id=upload_id), ensure_ascii=False, indent=2)
     elif uri.startswith('content-memory://jobs/'):
         job_id = uri.split('content-memory://jobs/', 1)[1]
         return ctx.jobs.resource_read(job_id)

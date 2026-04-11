@@ -226,13 +226,13 @@ content_articles/
 
 ---
 
-## 7. 为什么 articles 需要两条导入路径
+## 7. 为什么 articles 需要三条导入路径
 
 远程 ChatGPT 场景有个现实问题：
 
 **上传给 ChatGPT 的文件，不一定会原样透传给你的远程 MCP。**
 
-所以 1.3.0 的 `articles` 设计故意做成双通道：
+所以 `articles` 设计故意做成三通道：
 
 ### 路径 A：`articles.save_text`
 
@@ -258,6 +258,25 @@ content_articles/
 - Markdown
 - TXT
 - HTML
+
+### 路径 C：HTTP 上传入口 + `upload_id`
+
+适合：
+
+- ChatGPT 会话里拿到了附件
+- 但远程 MCP 工具拿不到服务器本地路径
+- 又不想把整份文件变成超长 Base64
+
+这条路的做法是：
+
+1. 先把文件上传到服务端 `/uploads`
+2. 服务端落盘并返回 `upload_id`
+3. 再调用 `articles.ingest_pdf` / `articles.ingest_epub` / `articles.ingest_txt`，只传 `upload_id`
+
+这样文件接收和文章导入被拆成两步：
+
+- 上传入口负责“接收文件”
+- MCP 工具负责“消费上传文件并归档”
 
 ---
 

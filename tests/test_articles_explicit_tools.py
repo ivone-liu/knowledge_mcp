@@ -48,6 +48,8 @@ def test_explicit_article_tools_are_listed_and_work(temp_roots, tmp_path):
     _SharedCore.reset_for_tests()
     ctx = AppContext()
     tools = build_tools(ctx)
+    assert 'uploads.get' in tools
+    assert 'uploads.list_recent' in tools
     assert 'articles.ingest_pdf' in tools
     assert 'articles.ingest_epub' in tools
     assert 'articles.ingest_txt' in tools
@@ -80,3 +82,24 @@ def test_explicit_pdf_epub_tools_support_base64_and_file(temp_roots, tmp_path):
     epub_done = _wait_job(ctx, epub_job['job_id'])
     assert epub_done['status'] == 'completed'
     assert epub_done['result']['article']['source_type'] == 'epub'
+
+
+def test_explicit_epub_tool_supports_upload_id(temp_roots, tmp_path):
+    _SharedCore.reset_for_tests()
+    ctx = AppContext()
+    tools = build_tools(ctx)
+
+    epub_path = tmp_path / 'novel.epub'
+    _make_epub(epub_path, '上传测试', ['第一章', '第二章'])
+    upload = ctx.uploads.accept_bytes(
+        filename='novel.epub',
+        content=epub_path.read_bytes(),
+        content_type='application/epub+zip',
+    )
+    upload_id = upload['upload']['id']
+
+    epub_job = tools['articles.ingest_epub']['handler']({'upload_id': upload_id, 'library': 'uploaded-books'})
+    epub_done = _wait_job(ctx, epub_job['job_id'])
+    assert epub_done['status'] == 'completed'
+    assert epub_done['result']['article']['source_type'] == 'epub'
+    assert epub_done['result']['article']['source_ref'].startswith(f'upload:{upload_id}:')

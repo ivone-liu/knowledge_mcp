@@ -8,6 +8,13 @@ import time
 from pathlib import Path
 
 import requests
+from ebooklib import epub
+
+
+def _session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    return session
 
 
 def _free_port() -> int:
@@ -18,11 +25,11 @@ def _free_port() -> int:
     return port
 
 
-def _wait_ready(base_url: str, timeout: float = 20.0) -> None:
+def _wait_ready(base_url: str, session: requests.Session, timeout: float = 20.0) -> None:
     last = None
     for _ in range(int(timeout * 10)):
         try:
-            res = requests.get(f"{base_url}/healthz", timeout=1)
+            res = session.get(f"{base_url}/healthz", timeout=1)
             if res.status_code == 200:
                 return
             last = RuntimeError(f"status={res.status_code}")
@@ -30,6 +37,38 @@ def _wait_ready(base_url: str, timeout: float = 20.0) -> None:
             last = exc
         time.sleep(0.1)
     raise AssertionError(f"HTTP server not ready: {last}")
+
+
+def _make_epub(path: Path, title: str, paragraphs: list[str]) -> None:
+    book = epub.EpubBook()
+    book.set_identifier('http-test-book')
+    book.set_title(title)
+    book.set_language('zh')
+    chapter = epub.EpubHtml(title='Chapter 1', file_name='chap_01.xhtml', lang='zh')
+    chapter.content = '<h1>Chapter 1</h1>' + ''.join(f'<p>{p}</p>' for p in paragraphs)
+    book.add_item(chapter)
+    book.toc = (epub.Link('chap_01.xhtml', 'Chapter 1', 'chapter1'),)
+    book.spine = ['nav', chapter]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    epub.write_epub(str(path), book)
+
+
+def _wait_job(base_url: str, session: requests.Session, headers: dict[str, str], job_id: str, timeout: float = 10.0) -> dict:
+    end = time.time() + timeout
+    while time.time() < end:
+        res = session.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 88, "method": "tools/call", "params": {"name": "jobs.get", "arguments": {"job_id": job_id}}},
+            timeout=5,
+        )
+        res.raise_for_status()
+        payload = res.json()["result"]["structuredContent"]
+        if payload.get("status") in {"completed", "failed", "cancelled"}:
+            return payload
+        time.sleep(0.1)
+    raise AssertionError(f"job not finished: {job_id}")
 
 
 def test_mcp_http_roundtrip(temp_roots):
@@ -52,11 +91,15 @@ def test_mcp_http_roundtrip(temp_roots):
     )
     try:
         base_url = f"http://127.0.0.1:{port}"
-        _wait_ready(base_url)
-        assert requests.get(f"{base_url}/mcp", timeout=3).status_code == 405
+        session = _session()
+        _wait_ready(base_url, session)
+        assert session.get(f"{base_url}/mcp", timeout=3).status_code == 405
+        upload_form = session.get(f"{base_url}/upload", timeout=3)
+        upload_form.raise_for_status()
+        assert "upload_id" in upload_form.text
 
         headers = {"Accept": "application/json, text/event-stream"}
-        init = requests.post(
+        init = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={
@@ -74,7 +117,7 @@ def test_mcp_http_roundtrip(temp_roots):
         assert payload["result"]["protocolVersion"] == "2025-11-25"
 
         headers["Mcp-Session-Id"] = session_id
-        notify = requests.post(
+        notify = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
@@ -82,7 +125,7 @@ def test_mcp_http_roundtrip(temp_roots):
         )
         assert notify.status_code == 202
 
-        bad = requests.post(
+        bad = session.post(
             f"{base_url}/mcp",
             headers={"Accept": "application/json"},
             json={"jsonrpc": "2.0", "id": 9, "method": "tools/list"},
@@ -90,7 +133,7 @@ def test_mcp_http_roundtrip(temp_roots):
         )
         assert bad.status_code == 400
 
-        tools = requests.post(
+        tools = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
@@ -98,6 +141,8 @@ def test_mcp_http_roundtrip(temp_roots):
         )
         tools.raise_for_status()
         tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
+        assert "uploads.get" in tool_names
+        assert "uploads.list_recent" in tool_names
         assert "notes.retrieve_context" in tool_names
         assert "articles.save_text" in tool_names
         assert "articles.ingest_pdf" in tool_names
@@ -105,7 +150,7 @@ def test_mcp_http_roundtrip(temp_roots):
         assert "articles.ingest_txt" in tool_names
         assert "system.health" in tool_names
 
-        add = requests.post(
+        add = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "notes.add", "arguments": {"text": "HTTP MCP 写入测试"}}},
@@ -116,7 +161,7 @@ def test_mcp_http_roundtrip(temp_roots):
         assert add_payload["ok"] is True
         record_id = add_payload["record"]["id"]
 
-        resource = requests.post(
+        resource = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": f"content-memory://notes/record/{record_id}"}},
@@ -125,7 +170,7 @@ def test_mcp_http_roundtrip(temp_roots):
         resource.raise_for_status()
         assert "HTTP MCP 写入测试" in resource.json()["result"]["contents"][0]["text"]
 
-        article_add = requests.post(
+        article_add = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "articles.save_text", "arguments": {"text": "# 远程文章\n\n把 PDF 转文字后归档。", "title": "远程文章"}}},
@@ -134,7 +179,7 @@ def test_mcp_http_roundtrip(temp_roots):
         article_add.raise_for_status()
         article_payload = article_add.json()["result"]["structuredContent"]
         article_id = article_payload["article"]["id"]
-        article_resource = requests.post(
+        article_resource = session.post(
             f"{base_url}/mcp",
             headers=headers,
             json={"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": f"content-memory://articles/item/articles/{article_id}"}},
@@ -143,7 +188,41 @@ def test_mcp_http_roundtrip(temp_roots):
         article_resource.raise_for_status()
         assert "远程文章" in article_resource.json()["result"]["contents"][0]["text"]
 
-        delete = requests.delete(f"{base_url}/mcp", headers={"Mcp-Session-Id": session_id}, timeout=5)
+        epub_path = temp_roots["articles"] / "http-upload.epub"
+        _make_epub(epub_path, "HTTP 上传", ["第一段上传内容", "第二段上传内容"])
+        upload = session.post(
+            f"{base_url}/uploads",
+            files={"file": ("http-upload.epub", epub_path.read_bytes(), "application/epub+zip")},
+            timeout=10,
+        )
+        upload.raise_for_status()
+        upload_payload = upload.json()
+        upload_id = upload_payload["upload"]["id"]
+        assert upload_payload["upload"]["recommended_tool"] == "articles.ingest_epub"
+
+        upload_tool = session.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "uploads.get", "arguments": {"upload_id": upload_id}}},
+            timeout=5,
+        )
+        upload_tool.raise_for_status()
+        assert upload_tool.json()["result"]["structuredContent"]["upload"]["filename"] == "http-upload.epub"
+
+        ingest = session.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "articles.ingest_epub", "arguments": {"upload_id": upload_id, "library": "uploaded-books"}}},
+            timeout=10,
+        )
+        ingest.raise_for_status()
+        queued = ingest.json()["result"]["structuredContent"]
+        job = _wait_job(base_url, session, headers, queued["job_id"])
+        assert job["status"] == "completed"
+        assert job["result"]["article"]["source_type"] == "epub"
+        assert job["result"]["article"]["source_ref"].startswith(f"upload:{upload_id}:")
+
+        delete = session.delete(f"{base_url}/mcp", headers={"Mcp-Session-Id": session_id}, timeout=5)
         assert delete.status_code == 204
     finally:
         proc.terminate()

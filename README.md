@@ -303,18 +303,26 @@ job 文件使用临时文件 + `fsync` + `os.replace`，避免半截 JSON。
 - `notes.update`
 - `notes.rebuild_index`
 
-### 7.3 articles
+### 7.3 uploads
+
+- `uploads.get`
+- `uploads.list_recent`
+
+### 7.4 articles
 
 - `articles.save_text`
 - `articles.ingest_file`
 - `articles.ingest_base64`
+- `articles.ingest_pdf`
+- `articles.ingest_epub`
+- `articles.ingest_txt`
 - `articles.list_recent`
 - `articles.search`
 - `articles.retrieve_context`
 - `articles.get`
 - `articles.rebuild_index`
 
-### 7.4 weixin
+### 7.5 weixin
 
 - `weixin.fetch_article`
 - `weixin.list_album_articles`
@@ -343,6 +351,8 @@ job 文件使用临时文件 + `fsync` + `os.replace`，避免半截 JSON。
 - `content-memory://articles/recent`
 - `content-memory://articles/library/{library}`
 - `content-memory://articles/item/{library}/{article_id}`
+- `content-memory://uploads/recent`
+- `content-memory://uploads/item/{upload_id}`
 - `content-memory://jobs/{job_id}`
 - `content-memory://weixin/accounts`
 - `content-memory://weixin/account/{account_slug}`
@@ -395,7 +405,10 @@ CONTENT_MEMORY_MCP_EMBEDDING_DIMENSIONS=1536
 CONTENT_MEMORY_MCP_HTTP_HOST=127.0.0.1
 CONTENT_MEMORY_MCP_HTTP_PORT=5335
 CONTENT_MEMORY_MCP_HTTP_MCP_PATH=/mcp
+CONTENT_MEMORY_MCP_HTTP_UPLOAD_PATH=/uploads
+CONTENT_MEMORY_MCP_HTTP_UPLOAD_FORM_PATH=/upload
 CONTENT_MEMORY_MCP_HTTP_HEALTH_PATH=/healthz
+CONTENT_MEMORY_MCP_UPLOAD_MAX_MB=50
 ```
 
 ### 9.5 队列与重试
@@ -446,6 +459,11 @@ MCP 路径默认是：
 
 - `http://127.0.0.1:5335/mcp`
 
+上传入口默认是：
+
+- `http://127.0.0.1:5335/upload`
+- `http://127.0.0.1:5335/uploads`
+
 ---
 
 ## 11. 域名与反向代理
@@ -464,6 +482,8 @@ MCP 路径默认是：
 建议反代这两个路径：
 
 - `/mcp`
+- `/upload`
+- `/uploads`
 - `/healthz`
 
 ---
@@ -510,6 +530,15 @@ MCP 路径默认是：
 
 但要注意，`ingest_base64` 会让任务 payload 变大，不适合拿来当主路径滥用。能用 `save_text` 时，优先 `save_text`。
 
+#### 场景 C：ChatGPT 拿到了文件，但拿不到服务器本地路径
+可以用：
+
+1. 先把文件上传到你的服务端 `POST /uploads`，或直接打开 `/upload` 页面选文件
+2. 拿到返回的 `upload_id`
+3. 再让 ChatGPT 调 `articles.ingest_pdf` / `articles.ingest_epub` / `articles.ingest_txt`，参数里只传 `upload_id`
+
+这样 ChatGPT 不需要知道服务器本地目录，也不需要把整个文件转成超长 Base64。
+
 ---
 
 ## 13. PDF / EPUB / TXT 导入建议
@@ -528,8 +557,9 @@ MCP 路径默认是：
 对远程 ChatGPT 场景，推荐顺序是：
 
 1. `articles.save_text`
-2. `articles.ingest_file`
-3. `articles.ingest_base64`
+2. `upload_id + articles.ingest_pdf/epub/txt`
+3. `articles.ingest_file`
+4. `articles.ingest_base64`
 
 不是因为后两者不能用，而是因为远程聊天场景里，**文本直存最稳定、最可控、最省事**。
 
@@ -596,10 +626,22 @@ MCP 路径默认是：
 - `articles.ingest_epub`
 - `articles.ingest_txt`
 
-这 3 个工具都支持两种输入方式：
+这 3 个工具都支持三种输入方式：
 
 1. `file_path`：服务器本地文件路径
-2. `content_base64` + `filename`：直接上传字节内容
+2. `upload_id`：先经由 HTTP 上传入口把文件接收到服务端
+3. `content_base64` + `filename`：直接上传字节内容
+
+如果你要让人工直接上传，可打开：
+
+- `/upload`：浏览器表单上传页
+- `/uploads`：HTTP multipart 上传接口
+
+上传成功后，响应里会返回：
+
+- `upload_id`
+- `recommended_tool`
+- `recommended_arguments`
 
 推荐用法：
 

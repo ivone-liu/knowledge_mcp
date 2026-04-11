@@ -49,6 +49,8 @@ def test_mcp_stdio_roundtrip(temp_roots):
 
         tools = send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tool_names = {tool["name"] for tool in tools["result"]["tools"]}
+        assert "uploads.get" in tool_names
+        assert "uploads.list_recent" in tool_names
         assert "notes.retrieve_context" in tool_names
         assert "weixin.fetch_article" in tool_names
         assert "weixin.fetch_album" in tool_names
