@@ -40,3 +40,11 @@ def detect_qdrant_base_dir() -> Path:
     if openclaw_data.exists():
         return (openclaw_data / "content-memory-mcp").resolve()
     return _home_fallback(".content-memory-mcp").resolve()
+
+
+def detect_articles_root() -> Path:
+    explicit = os.getenv("CONTENT_MEMORY_MCP_ARTICLES_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    return _home_fallback(".openclaw", "data", "content_articles").resolve() if _home_fallback(".openclaw").exists() else _home_fallback(".content-memory-mcp", "content_articles").resolve()

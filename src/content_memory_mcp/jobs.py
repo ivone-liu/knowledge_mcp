@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import queue
 import threading
 import time
@@ -46,11 +47,25 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
+def coerce_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='ignore')
+    try:
+        return str(value)
+    except Exception:
+        return ''
+
+
 @dataclass
 class JobStoreSettings:
     root: Path
     kb_rebuild_debounce_seconds: float = 45.0
     fetch_max_attempts: int = 3
+    article_max_attempts: int = 2
     internal_max_attempts: int = 2
     retry_backoff_seconds: float = 1.0
     retry_backoff_multiplier: float = 2.0
@@ -82,6 +97,7 @@ class JobStore:
         with self._lock:
             if self._worker_started and self._worker_thread and self._worker_thread.is_alive():
                 return
+            self._load_pending_jobs()
             self._worker_started = True
             self._stop.clear()
             self._worker_thread = threading.Thread(target=self._worker_loop, name='content-memory-mcp-worker', daemon=True)
@@ -138,15 +154,25 @@ class JobStore:
             return max(1, int(self.settings.internal_max_attempts))
         if action.startswith('weixin.fetch_') or action == 'weixin.batch_fetch':
             return max(1, int(self.settings.fetch_max_attempts))
+        if action.startswith('articles.ingest_'):
+            return max(1, int(self.settings.article_max_attempts))
         return 1
 
+    def _compact_payload_for_dedupe(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        compact = dict(payload or {})
+        if action == 'articles.ingest_base64':
+            content = coerce_text(compact.pop('content_base64', ''))
+            compact['content_base64_sha256'] = hashlib.sha256(content.encode('utf-8')).hexdigest() if content else ''
+            compact['content_base64_length'] = len(content)
+        return compact
+
     def _dedupe_key(self, action: str, payload: dict[str, Any], *, requested_by: str, internal: bool) -> str:
-        if not (action.startswith('weixin.fetch_') or action == 'weixin.batch_fetch' or action.startswith('internal.weixin.')):
+        if not (action.startswith('weixin.fetch_') or action == 'weixin.batch_fetch' or action.startswith('internal.weixin.') or action.startswith('articles.ingest_')):
             return ''
         normalized = json.dumps(
             {
                 'action': action,
-                'payload': payload,
+                'payload': self._compact_payload_for_dedupe(action, payload),
                 'requested_by': requested_by,
                 'internal': bool(internal),
             },
@@ -201,12 +227,14 @@ class JobStore:
             return job
 
     def get(self, job_id: str) -> dict[str, Any]:
+        self.start()
         path = self._job_path(job_id)
         if not path.exists():
             raise KeyError(f'unknown job: {job_id}')
         return self._read_json(path, {})
 
     def list(self, *, status: str = '', limit: int = 50, include_internal: bool = False) -> dict[str, Any]:
+        self.start()
         rows = []
         for path in sorted(self.jobs_dir.glob('*.json'), reverse=True):
             job = self._read_json(path, {})
@@ -311,7 +339,7 @@ class JobStore:
         return {'type': type(exc).__name__, 'message': str(exc)}
 
     def _is_retryable_exception(self, action: str, exc: Exception) -> bool:
-        if not (action.startswith('weixin.fetch_') or action == 'weixin.batch_fetch' or action.startswith('internal.weixin.')):
+        if not (action.startswith('weixin.fetch_') or action == 'weixin.batch_fetch' or action.startswith('internal.weixin.') or action.startswith('articles.ingest_')):
             return False
         if isinstance(exc, NON_RETRYABLE_EXCEPTIONS):
             return False
@@ -334,6 +362,7 @@ class JobStore:
         return round(base * (multiplier ** max(0, attempt - 1)), 3)
 
     def health(self) -> dict[str, Any]:
+        self.start()
         worker_alive = bool(self._worker_thread and self._worker_thread.is_alive())
         return {
             'root': str(self.root),
@@ -342,6 +371,7 @@ class JobStore:
             'queued_in_memory': len(self._queued_ids),
             'kb_dirty_count': len(self.kb_dirty_state()),
             'fetch_max_attempts': self.settings.fetch_max_attempts,
+            'article_max_attempts': self.settings.article_max_attempts,
             'internal_max_attempts': self.settings.internal_max_attempts,
         }
 
@@ -444,5 +474,6 @@ class JobStore:
                 continue
 
     def resource_read(self, job_id: str) -> dict[str, Any]:
+        self.start()
         job = self.get(job_id)
         return {'contents': [{'uri': f'content-memory://jobs/{job_id}', 'mimeType': 'application/json', 'text': json.dumps(self._present_job(job, with_result=True), ensure_ascii=False, indent=2)}]}

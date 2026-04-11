@@ -5,6 +5,7 @@ import sys
 import traceback
 from typing import Any
 
+from . import __version__
 from .prompts import get_prompt, list_prompts
 from .resources import list_resource_templates, list_resources, read_resource
 from .tooling import AppContext, call_tool, tool_list_payload
@@ -72,7 +73,7 @@ class ContentMemoryMCPServer:
                     },
                     "serverInfo": {
                         "name": "content-memory-mcp",
-                        "version": "1.2.0.post1",
+                        "version": __version__,
                         "description": "Unified MCP server for notes, WeChat corpora, and Qdrant-backed RAG retrieval.",
                     },
                     "instructions": "Use tools for writes, retrieval, and RAG context assembly. Use resources for quick snapshots and prompts for explicit workflows.",

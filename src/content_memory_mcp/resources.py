@@ -22,6 +22,20 @@ RESOURCE_TEMPLATES = [
         'mimeType': 'application/json',
     },
     {
+        'name': 'articles-item',
+        'title': '读取文章库文章',
+        'uriTemplate': 'content-memory://articles/item/{library}/{article_id}',
+        'description': '返回指定文章的 Markdown 正文和元数据。',
+        'mimeType': 'text/markdown',
+    },
+    {
+        'name': 'articles-library',
+        'title': '读取文章库列表',
+        'uriTemplate': 'content-memory://articles/library/{library}',
+        'description': '返回指定文章库下的近期文章列表。',
+        'mimeType': 'application/json',
+    },
+    {
         'name': 'job-status',
         'title': '读取任务状态',
         'uriTemplate': 'content-memory://jobs/{job_id}',
@@ -69,6 +83,13 @@ def list_resources(ctx: AppContext) -> list[dict[str, Any]]:
             'mimeType': 'application/json',
         },
         {
+            'uri': 'content-memory://articles/recent',
+            'name': 'articles-recent',
+            'title': '近期文章',
+            'description': '最近保存的长文归档列表。',
+            'mimeType': 'application/json',
+        },
+        {
             'uri': 'content-memory://weixin/accounts',
             'name': 'weixin-accounts',
             'title': '公众号账号索引',
@@ -89,6 +110,7 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
         text = json.dumps(
             {
                 'notes_root': str(ctx.notes.root),
+                'articles_root': str(ctx.articles.root),
                 'weixin_root': str(ctx.weixin.root),
                 'jobs_root': str(ctx.jobs.root),
                 'rag': ctx.rag.health(),
@@ -97,6 +119,9 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
                     'system.health',
                     'jobs.get',
                     'jobs.list',
+                    'articles.save_text',
+                    'articles.ingest_file',
+                    'articles.search',
                     'weixin.fetch_article',
                     'weixin.fetch_album',
                     'weixin.fetch_history',
@@ -111,6 +136,7 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
         text = json.dumps(
             {
                 'notes': ctx.notes.health(),
+                'articles': ctx.articles.health(),
                 'weixin': ctx.weixin.health(),
                 'rag': ctx.rag.health(),
                 'jobs': ctx.jobs.health(),
@@ -120,6 +146,8 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
         )
     elif uri == 'content-memory://notes/today':
         text = json.dumps(ctx.notes.list_today(), ensure_ascii=False, indent=2)
+    elif uri == 'content-memory://articles/recent':
+        text = json.dumps(ctx.articles.list_recent(), ensure_ascii=False, indent=2)
     elif uri == 'content-memory://weixin/accounts':
         text = json.dumps(ctx.weixin.list_accounts(), ensure_ascii=False, indent=2)
     elif uri.startswith('content-memory://notes/date/'):
@@ -128,6 +156,15 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
     elif uri.startswith('content-memory://notes/record/'):
         record_id = uri.split('content-memory://notes/record/', 1)[1]
         text = json.dumps(ctx.notes.get_raw(record_id=record_id), ensure_ascii=False, indent=2)
+    elif uri.startswith('content-memory://articles/library/'):
+        library = uri.split('content-memory://articles/library/', 1)[1]
+        text = json.dumps(ctx.articles.list_recent(library=library), ensure_ascii=False, indent=2)
+    elif uri.startswith('content-memory://articles/item/'):
+        suffix = uri.split('content-memory://articles/item/', 1)[1]
+        library, article_id = suffix.split('/', 1)
+        article = ctx.articles.get(article_id=article_id, library=library)
+        mime = 'text/markdown'
+        text = (article.get('article') or {}).get('content_markdown') or json.dumps(article, ensure_ascii=False, indent=2)
     elif uri.startswith('content-memory://jobs/'):
         job_id = uri.split('content-memory://jobs/', 1)[1]
         return ctx.jobs.resource_read(job_id)

@@ -99,6 +99,7 @@ def test_mcp_http_roundtrip(temp_roots):
         tools.raise_for_status()
         tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
         assert "notes.retrieve_context" in tool_names
+        assert "articles.save_text" in tool_names
         assert "system.health" in tool_names
 
         add = requests.post(
@@ -120,6 +121,24 @@ def test_mcp_http_roundtrip(temp_roots):
         )
         resource.raise_for_status()
         assert "HTTP MCP 写入测试" in resource.json()["result"]["contents"][0]["text"]
+
+        article_add = requests.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "articles.save_text", "arguments": {"text": "# 远程文章\n\n把 PDF 转文字后归档。", "title": "远程文章"}}},
+            timeout=10,
+        )
+        article_add.raise_for_status()
+        article_payload = article_add.json()["result"]["structuredContent"]
+        article_id = article_payload["article"]["id"]
+        article_resource = requests.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": f"content-memory://articles/item/articles/{article_id}"}},
+            timeout=5,
+        )
+        article_resource.raise_for_status()
+        assert "远程文章" in article_resource.json()["result"]["contents"][0]["text"]
 
         delete = requests.delete(f"{base_url}/mcp", headers={"Mcp-Session-Id": session_id}, timeout=5)
         assert delete.status_code == 204

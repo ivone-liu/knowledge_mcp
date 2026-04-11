@@ -1,257 +1,297 @@
 # content-memory-mcp
 
-一个面向 **ChatGPT 远程 MCP** 场景的内容中台。
+一个面向 **ChatGPT / 远程 MCP** 的内容中台，用来管理三类内容资产：
 
-它把两类内容能力收进同一套 MCP 服务里：
+- **notes**：短笔记、会议记录、灵感碎片
+- **articles**：长文归档，适合 PDF / EPUB / TXT / Markdown / HTML 或 GPT 整理后的正文
+- **weixin**：微信公众号文章、专辑、历史消息与风格语料
 
-- **notes**：长期笔记 / 灵感 / 结构化记录
-- **weixin**：微信公众号文章抓取、归档、检索、风格知识库与 RAG
-
-项目的核心目标不是“把两个 skill 原样搬过来”，而是把它们背后的**可执行能力**抽成一个稳定的 MCP 服务，让 ChatGPT 能通过自然语言触发工具，再由服务完成存储、检索和 RAG 召回。
-
----
-
-## 这个项目解决什么问题
-
-### 1. 让内容能力从 skill 提示词变成真正的服务
-原始 skill 更擅长表达工作流和触发语义，但不适合承载长期运行的远程抓取、存储、队列、索引和状态管理。
-
-这个项目把这些能力下沉为 MCP：
-
-- 抓取文章
-- 写入主库
-- 写入 Qdrant 向量索引
-- 查询文章 / 笔记
-- 提供 RAG 上下文
-- 暴露 resources / prompts / tools
-
-### 2. 适配 ChatGPT 的 remote MCP 模式
-ChatGPT 不是通过 slash command 触发 skill，而是通过 remote MCP app / connector 调用工具。
-
-所以这个项目重点解决的是：
-
-- HTTP 远程接入
-- 域名反代
-- 任务队列
-- 返回结构去本地路径化
-- 让工具结果对 ChatGPT 真正可读
-
-### 3. 把“内容真相源”和“向量索引层”分开
-这个项目默认采用：
-
-- **主库**：本地文件 / JSON / Markdown
-- **索引层**：Qdrant
-- **语义向量**：embedding 服务生成
-
-这样后面要重建索引时，不需要迁正文，只需要重嵌入和重写 Qdrant。
+这个项目不是把几个 skill 硬包成壳，而是把“可复用能力”抽成一个 **Remote MCP Server**。上层客户端用自然语言触发，底层通过 Tools / Resources / Jobs / RAG 完成写入、检索、归档和上下文召回。
 
 ---
 
-## 整体架构
+## 1. 这个项目解决什么问题
+
+现实里的内容资产通常不是一类东西。
+
+一部分是碎片化信息，比如会议纪要、产品想法、临时待办。这类内容应该像工作记忆一样轻量可写。
+
+另一部分是长文内容，比如 PDF、EPUB、报告、白皮书、手册、故事素材、GPT 已经整理好的正文。这类内容更像“文章资产”，不该和碎片笔记混在一起。
+
+还有一部分是微信公众号内容。它不是你自己写的原始长文，而是外部语料，通常用于风格学习、案例参考、选题分析、知识沉淀。
+
+所以这个项目把内容拆成三个域：
+
+- `notes`
+- `articles`
+- `weixin`
+
+三者共享同一套基础设施：
+
+- 主库存储
+- Qdrant 向量检索
+- Embedding
+- MCP 协议层
+- 任务队列与健康检查
+
+---
+
+## 2. 总体架构
 
 ```text
-ChatGPT / 其他 MCP Client
-        |
-        |  HTTPS
-        v
-Nginx / Caddy / Cloudflare Tunnel
+ChatGPT / 其他 MCP 客户端
         |
         v
-content-memory-mcp (FastAPI + MCP Streamable HTTP)
+Remote MCP HTTP Server (/mcp)
         |
-        +-- notes tools/resources
-        +-- weixin tools/resources
-        +-- jobs tools/resources
+        +-- notes service
+        +-- articles service
+        +-- weixin service
+        +-- jobs queue
         |
-        +-- 主库存储（JSON / Markdown / HTML）
-        +-- Qdrant 向量索引
+        +-- 主库存储（本地文件）
+        +-- Qdrant（chunk 向量索引）
+        +-- Embedding 服务（OpenAI 兼容 /embeddings）
 ```
 
-### 分层职责
+分层职责是明确的：
 
-#### MCP 层
-负责对外暴露：
-- tools
-- resources
-- prompts
-- HTTP / Streamable MCP 协议
+### 主库
+负责保存原始内容和结构化元数据。
 
-#### service 层
-负责业务逻辑：
-- notes 服务
-- weixin 服务
-- 异步 job 队列
+### Qdrant
+负责保存 chunk 向量和 payload，用于召回，不承担原文真相源角色。
 
-#### storage 层
-负责落盘与索引：
-- 本地主库
-- Qdrant collection
+### Embedding
+负责把文本转成向量，不负责持久化内容。
+
+所以这套设计里：
+
+- Qdrant 不是主库
+- 主库还在本地，可重建索引
+- 向量模型只做语义表示
 
 ---
 
-## 数据设计
+## 3. 三个内容域
 
-### Notes
-笔记是长期内容主库，默认走：
+### 3.1 notes
 
-- JSONL 原始记录
-- JSON catalog 索引
-- Qdrant chunk 向量索引
+适合：
 
-#### 为什么 notes 用一个 collection
-当前不建议一开始把产品、UI、商业、故事拆成多个 Qdrant collection。
+- 会议纪要
+- 产品讨论点
+- 临时想法
+- 待办上下文
+- 工作记忆
 
-更合理的是：
-- notes 一个 collection
-- 用 `library` / `tags` / `category` 做过滤
+特点：
 
-因为你真正要解决的是“按视角检索”，不是“先把库拆碎”。
+- 写入快
+- 结构轻
+- 以 JSON 主库为中心
+- 适合短文本检索与提炼
 
-### Weixin
-公众号内容默认分成单独 collection：
+### 3.2 articles
 
-- `content_memory_weixin_chunks`
+适合：
 
-这样做是因为公众号文章和 notes 在语料分布、metadata 和使用方式上差异很大，混在一起只会让检索和过滤变脏。
+- PDF 提取后的长文
+- EPUB 提取后的正文
+- TXT / Markdown / HTML 文档
+- GPT 已经整理好的长文
+- 手册、报告、课程讲义、故事素材
+
+特点：
+
+- 独立于 notes
+- 以“文章正文”而不是“碎片笔记”为中心
+- 有独立存储根目录和独立 RAG collection
+- 支持文本直存，也支持文件导入
+
+这个域就是为下面这种场景准备的：
+
+> 我把 PDF 扔给 GPT，GPT 先转成文字，再归档成长文内容。
+
+### 3.3 weixin
+
+适合：
+
+- 单篇公众号文章抓取
+- 专辑抓取
+- 历史消息抓取
+- 账号级语料沉淀
+- 风格知识库构建
+
+特点：
+
+- 抓取类动作默认走任务队列
+- 高频调用不会同步硬跑
+- 不再返回本地路径
+- KB 重建采用 dirty + debounce 策略
 
 ---
 
-## RAG 设计
+## 4. RAG 设计
 
-### 写入链路
+### 4.1 写入链路
 
-#### notes
-1. 写入主库
-2. 生成文档文本
+无论是 notes、articles 还是 weixin，进入索引层的逻辑都是同一套思路：
+
+1. 保存到主库
+2. 提取正文文本
 3. 切 chunk
 4. 调 embedding
 5. 写入 Qdrant
 
-#### weixin
-1. 抓取公众号文章
-2. 落盘到 markdown / html / json
-3. 更新 registry / account info
-4. 提取正文
-5. 切 chunk
-6. 调 embedding
-7. 写入 Qdrant
+### 4.2 查询链路
 
-### 查询链路
-1. 查询词做 embedding
+1. 用户查询做 embedding
 2. 去 Qdrant 检索 top-k chunks
-3. 按 document/article 聚合
-4. 返回：
-   - 文档级结果
-   - chunk 级上下文
+3. 按 document / article 聚合
+4. 返回文档级结果或 chunk 级上下文
 
-### 为什么 Qdrant 不是主库
-Qdrant 是向量检索层，不是正文真相源。
+### 4.3 Collection 设计
 
-如果把 Qdrant 当主库，你后面一旦换 embedding 模型、调整 chunk 策略、重建 collection，内容资产就容易失真。
+默认分成三个域：
 
----
+- `content_memory_notes_chunks`
+- `content_memory_articles_chunks`
+- `content_memory_weixin_chunks`
 
-## 公众号抓取为什么改成任务队列
+这样做是为了避免不同来源、不同元数据结构、不同使用方式的内容互相污染。
 
-1.2.0 开始，`weixin.fetch_*` 不再同步执行完整抓取，而是：
+每个 collection 内仍然通过 payload 继续筛选，例如：
 
-1. 提交任务
-2. 返回 `job_id`
-3. 后台 worker 串行执行
-4. 通过 `jobs.get` 或 `content-memory://jobs/{job_id}` 查看结果
-
-### 为什么必须这么改
-因为远程 MCP 场景下，同步抓取会带来四个问题：
-
-- 请求太重，容易超时
-- 高频抓取时反复重建同一个账号 KB
-- 返回结果夹带本地路径，ChatGPT 无法消费
-- 一次抓取里混合网络、I/O、索引和 KB，状态不稳定
-
-### 当前队列策略
-当前版本采用：
-
-- **全局单 worker 串行执行**
-- 抓取任务按提交顺序逐个跑
-- 适合稳定优先的远程服务模式
-
-这是刻意的，不是偷懒。
-
-现在最重要的是稳定，而不是并发数看起来更大。
+- `library`
+- `tags`
+- `source_type`
+- `account_slug`
 
 ---
 
-## KB 重建策略
+## 5. 为什么 articles 不等于 notes
 
-公众号抓取和 KB 重建已经拆开。
+“长文归档”不是“长一点的笔记”。
 
-### 现在的行为
-- 抓取任务完成后，文章会保存并写入 RAG
-- 如果调用时设置 `rebuild_kb=true`，不会立刻同步重建 KB
-- 系统只会把账号标记为 `kb_dirty`
-- 后台会按 `CONTENT_MEMORY_MCP_WEIXIN_KB_DEBOUNCE_SECONDS` 延迟重建
+区别在于：
 
-### 为什么这样做
-因为“每抓一篇就立刻 rebuild KB”在高频使用时几乎必炸：
+- notes 更像工作记忆
+- articles 更像内容资产
 
-- 重复 I/O
-- 重复分析
-- 返回时间不稳定
-- 账号级状态更容易竞态
+所以 articles 有自己的：
+
+- 存储根目录
+- 资源 URI
+- RAG collection
+- 导入链路
+- 工具接口
+
+这样做能避免把 PDF、EPUB、产品文档、故事素材全塞进 notes，最后把笔记库变成垃圾场。
 
 ---
 
-## 远程返回为什么不再带本地路径
+## 6. 队列、健壮性与高可用设计
 
-远程 ChatGPT 看不到你服务器上的：
+这部分是当前版本最重要的稳定性设计。
 
-- `/.../article.md`
-- `/.../meta.json`
-- `/KB/.../style-playbook.md`
+### 6.1 哪些动作会入队
 
-这些路径只对本机开发有意义，对 remote MCP 客户端没有意义。
+这些动作默认不会同步硬跑：
 
-所以 1.2.0 开始，抓取类工具返回值里不再暴露这些本地路径，而是返回：
+- `weixin.fetch_article`
+- `weixin.fetch_album`
+- `weixin.fetch_history`
+- `weixin.batch_fetch`
+- `articles.ingest_file`
+- `articles.ingest_base64`
+
+这些动作会先返回：
 
 - `job_id`
-- `status`
-- `resource_uri`
-- 文章摘要信息
-- warnings
+- `status=accepted`
+- `resource_uri=content-memory://jobs/{job_id}`
 
-真正可读取的内容应该通过 MCP resource 暴露，比如：
+然后由后台 worker 串行执行。
 
-- `content-memory://jobs/{job_id}`
-- `content-memory://weixin/article/{account_slug}/{uid}`
+### 6.2 为什么要用队列
+
+因为公众号抓取和长文导入都可能比较重：
+
+- 请求时间长
+- 文件处理慢
+- 切 chunk + embedding 较慢
+- 高频请求容易互相挤压
+
+如果全部同步执行，会很容易出现：
+
+- HTTP 请求超时
+- 同账号重复重建 KB
+- 长文处理中途失败导致整体结果不稳定
+
+所以当前策略是：
+
+- 重活入队
+- worker 串行执行
+- 客户端轮询 job 状态
+
+### 6.3 当前队列的稳态特性
+
+当前版本已经具备这些容错能力：
+
+#### 任务持久化
+job 状态写到磁盘，不只在内存里。
+
+#### 原子写入
+job 文件使用临时文件 + `fsync` + `os.replace`，避免半截 JSON。
+
+#### 重启恢复
+进程重启后，原本处于 `running` 的任务会恢复成 `queued`，重新入队。
+
+#### 自动重试
+对临时性错误会自动退避重试：
+
+- 抓取类任务默认重试 3 次
+- 文章导入类任务默认重试 2 次
+- 内部 KB 重建默认重试 2 次
+
+#### 高频去重
+相同的抓取/导入请求在 `queued` 或 `running` 状态下不会重复入队，而是直接返回已有 `job_id`。
+
+#### 本地路径去除
+远程 MCP 返回结果里不再暴露本地绝对路径，避免 `Resource not found` 一类错误。
+
+### 6.4 当前高可用边界
+
+实话说，这一版是 **高健壮单机版**，不是分布式高可用集群。
+
+也就是说，它适合：
+
+- 一台机器
+- 一个服务进程
+- 一个数据目录
+- 前面挂 Nginx / Caddy 反代
+
+它现在不适合：
+
+- 多实例同时写同一份本地数据目录
+- 把本地文件 job store 当分布式消息队列用
+
+如果以后你要升级成多实例 HA，那就要换 Redis / DB 队列和外部锁，这不是当前版本的目标。
 
 ---
 
-## 稳定性与容错
+## 7. MCP 能力总览
 
-这版额外补了 4 个关键保命件：
+### 7.1 system / jobs
 
-- **任务文件原子写入**：job 状态文件先写临时文件，再 `os.replace` 覆盖，避免异常中断时留下半截 JSON。
-- **抓取类自动重试**：`weixin.fetch_*` 与内部 `rebuild_kb` 遇到超时、连接异常、429/5xx 等暂时性错误时，会按退避策略自动重试。
-- **高频重复提交去重**：相同抓取请求在 `queued/running` 状态下不会重复入队，而是返回已有 `job_id`。
-- **worker 自恢复保护**：调度循环有最外层保护，异常会落盘到 `state/worker-last-error.json`，线程不会因为一次异常直接死亡。
-
-相关环境变量：
-
-- `CONTENT_MEMORY_MCP_JOB_FETCH_MAX_ATTEMPTS`
-- `CONTENT_MEMORY_MCP_JOB_INTERNAL_MAX_ATTEMPTS`
-- `CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_SECONDS`
-- `CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_MULTIPLIER`
-
----
-
-## 主要工具
-
-### jobs
+- `system.health`
 - `jobs.get`
 - `jobs.list`
 - `jobs.cancel`
 
-### notes
+### 7.2 notes
+
 - `notes.add`
 - `notes.list_today`
 - `notes.list_by_date`
@@ -263,13 +303,25 @@ Qdrant 是向量检索层，不是正文真相源。
 - `notes.update`
 - `notes.rebuild_index`
 
-### weixin
-- `weixin.fetch_article`（异步）
+### 7.3 articles
+
+- `articles.save_text`
+- `articles.ingest_file`
+- `articles.ingest_base64`
+- `articles.list_recent`
+- `articles.search`
+- `articles.retrieve_context`
+- `articles.get`
+- `articles.rebuild_index`
+
+### 7.4 weixin
+
+- `weixin.fetch_article`
 - `weixin.list_album_articles`
-- `weixin.fetch_album`（异步）
+- `weixin.fetch_album`
 - `weixin.list_history_articles`
-- `weixin.fetch_history`（异步）
-- `weixin.batch_fetch`（异步）
+- `weixin.fetch_history`
+- `weixin.batch_fetch`
 - `weixin.list_accounts`
 - `weixin.get_account_info`
 - `weixin.list_arrivals`
@@ -281,21 +333,87 @@ Qdrant 是向量检索层，不是正文真相源。
 
 ---
 
-## 主要 resources
+## 8. Resources
+
+当前暴露的核心资源包括：
 
 - `content-memory://overview`
 - `content-memory://system/health`
 - `content-memory://notes/today`
-- `content-memory://notes/date/{date}`
-- `content-memory://notes/record/{id}`
+- `content-memory://articles/recent`
+- `content-memory://articles/library/{library}`
+- `content-memory://articles/item/{library}/{article_id}`
 - `content-memory://jobs/{job_id}`
 - `content-memory://weixin/accounts`
 - `content-memory://weixin/account/{account_slug}`
 - `content-memory://weixin/article/{account_slug}/{uid}`
 
+这些资源都是远程 MCP 可读资源，不依赖你本地文件路径暴露给客户端。
+
 ---
 
-## 安装
+## 9. 配置
+
+主要配置在 `.env` 中。
+
+可先复制：
+
+```bash
+cp .env.example .env
+```
+
+### 9.1 存储根目录
+
+```bash
+CONTENT_MEMORY_MCP_NOTES_ROOT=~/.openclaw/workspace/agent-memory
+CONTENT_MEMORY_MCP_ARTICLES_ROOT=~/.openclaw/data/content_articles
+CONTENT_MEMORY_MCP_WEIXIN_ROOT=~/.openclaw/data/mp_weixin
+```
+
+### 9.2 Qdrant
+
+```bash
+CONTENT_MEMORY_MCP_QDRANT_MODE=server
+CONTENT_MEMORY_MCP_QDRANT_URL=http://127.0.0.1:6333
+CONTENT_MEMORY_MCP_QDRANT_API_KEY=
+CONTENT_MEMORY_MCP_QDRANT_COLLECTION_PREFIX=content_memory
+```
+
+### 9.3 Embedding
+
+```bash
+CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER=openai
+CONTENT_MEMORY_MCP_EMBEDDING_BASE_URL=https://your-embedding-endpoint/v1
+CONTENT_MEMORY_MCP_EMBEDDING_API_KEY=replace_me
+CONTENT_MEMORY_MCP_EMBEDDING_MODEL=text-embedding-3-small
+CONTENT_MEMORY_MCP_EMBEDDING_DIMENSIONS=1536
+```
+
+### 9.4 HTTP 服务
+
+```bash
+CONTENT_MEMORY_MCP_HTTP_HOST=127.0.0.1
+CONTENT_MEMORY_MCP_HTTP_PORT=5335
+CONTENT_MEMORY_MCP_HTTP_MCP_PATH=/mcp
+CONTENT_MEMORY_MCP_HTTP_HEALTH_PATH=/healthz
+```
+
+### 9.5 队列与重试
+
+```bash
+CONTENT_MEMORY_MCP_WEIXIN_KB_DEBOUNCE_SECONDS=45
+CONTENT_MEMORY_MCP_JOB_FETCH_MAX_ATTEMPTS=3
+CONTENT_MEMORY_MCP_JOB_ARTICLE_MAX_ATTEMPTS=2
+CONTENT_MEMORY_MCP_JOB_INTERNAL_MAX_ATTEMPTS=2
+CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_SECONDS=1
+CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_MULTIPLIER=2
+```
+
+---
+
+## 10. 安装与启动
+
+### 10.1 一键安装
 
 ```bash
 ./install.sh
@@ -303,136 +421,168 @@ Qdrant 是向量检索层，不是正文真相源。
 
 安装脚本会做这些事：
 
-1. 检查 Python 版本
-2. 创建 `.venv`
-3. 安装依赖
-4. 判断是否已经安装过，已安装则跳过
-5. 拉起本地 Qdrant（如果你没有指定外部 Qdrant）
-6. 跑一遍 smoke 测试
+- 检查 Python 版本
+- 创建 `.venv`
+- 安装依赖
+- 自动判断是否已安装完成，已安装则跳过
+- 检查或拉起本地 Qdrant
+- 运行离线 smoke 测试
 
----
-
-## 启动
+### 10.2 启动服务
 
 ```bash
 ./start.sh
 ```
 
-默认监听：
+启动后默认监听：
 
 - `127.0.0.1:5335`
-- `/mcp`
-- `/healthz`
 
-这意味着它适合这样部署：
+可用健康检查：
 
-- 本地只监听 `127.0.0.1:5335`
-- 域名层通过 Nginx/Caddy 反向代理
-- ChatGPT 只访问你的 HTTPS 域名
+- `http://127.0.0.1:5335/healthz`
+
+MCP 路径默认是：
+
+- `http://127.0.0.1:5335/mcp`
 
 ---
 
-## 域名反代
+## 11. 域名与反向代理
 
-目标映射：
+如果你要给 ChatGPT 远程使用，应该把域名反代到本地 5335 端口。
 
-- `https://your-domain/mcp` -> `http://127.0.0.1:5335/mcp`
-- `https://your-domain/healthz` -> `http://127.0.0.1:5335/healthz`
+推荐：
 
-项目里带了示例配置：
+- 外部：`https://your-domain.com/mcp`
+- 内部：`http://127.0.0.1:5335/mcp`
+
+项目里已经提供示例：
 
 - `deploy/nginx.content-memory-mcp.conf.example`
 
----
+建议反代这两个路径：
 
-## ChatGPT 里怎么用
-
-ChatGPT 不是靠 slash command 触发这个项目，而是：
-
-1. 先把你的 remote MCP server 接进去
-2. 在聊天里用自然语言调用
-
-比如：
-
-- `@content-memory 添加一条笔记：今天确认产品方案优先级`
-- `@content-memory 抓取这篇公众号文章并入库：<url>`
-- `@content-memory 查看这个抓取任务的结果：job_xxx`
-- `@content-memory 搜索我关于 RAG 的笔记`
+- `/mcp`
+- `/healthz`
 
 ---
 
-## 配置说明
+## 12. 在 ChatGPT 里怎么用
 
-看 `.env.example`。
+这里有个认知要纠正：
 
-重点配置有四类：
+**ChatGPT 不是通过 slash command 调 MCP。**
 
-### 1. 主库目录
-- `CONTENT_MEMORY_MCP_NOTES_ROOT`
-- `CONTENT_MEMORY_MCP_WEIXIN_ROOT`
+正常方式是：
 
-### 2. Qdrant
-- `CONTENT_MEMORY_MCP_QDRANT_MODE`
-- `CONTENT_MEMORY_MCP_QDRANT_URL`
-- `CONTENT_MEMORY_MCP_QDRANT_COLLECTION_PREFIX`
+- 把这个服务配置成远程 MCP app / connector
+- 在 ChatGPT 对话里通过自然语言触发
 
-### 3. Embedding
-- `CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER`
-- `CONTENT_MEMORY_MCP_EMBEDDING_BASE_URL`
-- `CONTENT_MEMORY_MCP_EMBEDDING_API_KEY`
-- `CONTENT_MEMORY_MCP_EMBEDDING_MODEL`
-- `CONTENT_MEMORY_MCP_EMBEDDING_DIMENSIONS`
+也就是说，你不是输入 `/note`，而是直接说：
 
-### 4. HTTP / 队列
-- `CONTENT_MEMORY_MCP_HTTP_HOST`
-- `CONTENT_MEMORY_MCP_HTTP_PORT`
-- `CONTENT_MEMORY_MCP_HTTP_MCP_PATH`
-- `CONTENT_MEMORY_MCP_HTTP_HEALTH_PATH`
-- `CONTENT_MEMORY_MCP_WEIXIN_KB_DEBOUNCE_SECONDS`
+- “把这段会议结论记到 notes”
+- “把这份 PDF 转成正文后存到 articles”
+- “抓取这个公众号链接并归档”
+- “基于我最近保存的文章，帮我提炼产品思路”
+
+### 推荐的使用策略
+
+#### 场景 A：ChatGPT 已经拿到了 PDF / EPUB 内容
+最稳的方式是：
+
+1. 先让 GPT 读文件
+2. GPT 把正文整理出来
+3. 调 `articles.save_text`
+
+这是最稳的，因为不依赖附件字节流透传。
+
+#### 场景 B：你的服务端已经拿到文件
+可以用：
+
+- `articles.ingest_file`
+- `articles.ingest_base64`
+
+其中：
+
+- `ingest_file` 更适合本地部署场景
+- `ingest_base64` 更适合外部系统转交文件字节流
+
+但要注意，`ingest_base64` 会让任务 payload 变大，不适合拿来当主路径滥用。能用 `save_text` 时，优先 `save_text`。
 
 ---
 
-## 测试
+## 13. PDF / EPUB / TXT 导入建议
 
-```bash
-pytest -q
-```
+### PDF
+适合有真实正文、提取质量较好的文档。
 
-当前测试覆盖：
+### EPUB
+适合电子书、合集、章节文档。系统会提取章节正文并归档为 Markdown 风格正文。
 
-- notes 写入 / 检索 / RAG
-- weixin 单篇抓取
-- WeSpy 对齐能力
-- 稳定性回归
+### TXT
+适合纯文本长文、转写内容、日志整理结果。
+
+### 推荐顺序
+
+对远程 ChatGPT 场景，推荐顺序是：
+
+1. `articles.save_text`
+2. `articles.ingest_file`
+3. `articles.ingest_base64`
+
+不是因为后两者不能用，而是因为远程聊天场景里，**文本直存最稳定、最可控、最省事**。
+
+---
+
+## 14. 测试与审计范围
+
+项目内置了多组测试，覆盖：
+
+- notes 主流程
+- weixin 单篇 / 专辑 / history / 队列 / 稳定性
+- articles 文本保存、文件导入、Base64 导入、队列导入
 - MCP stdio
 - MCP HTTP
-- 公众号任务队列与无本地路径返回
+- job 重试与幂等
+
+另外安装脚本还会跑离线 smoke，自检 HTTP 服务、MCP 初始化和基础写读链路。
 
 ---
 
-## 当前边界
+## 15. 当前边界
 
-这个项目不是“万能 CMS”。
+当前版本已经适合：
 
-它当前更像一个：
+- 个人部署
+- 单机部署
+- ChatGPT 远程 MCP 接入
+- 需要 notes / articles / weixin 三域内容管理
+- 需要真实 RAG 和任务队列
 
-- 内容归档服务
-- 任务队列服务
-- RAG 检索服务
-- MCP 远程接入层
+当前版本还不打算解决：
 
-如果你后面要继续演进，最值得做的方向是：
+- 多实例共享本地目录的分布式 HA
+- 外部消息队列
+- 分布式锁
+- 多 worker 并发写同一内容域
 
-1. 账号级队列，而不是全局单队列
-2. 更细的 KB resource 暴露
-3. 更细的权限隔离
-4. 抓取失败重试与退避
-5. 更完整的可观测性
+如果未来真要上那一层，就不是“补个小版本”了，而是要把 job store 和锁机制换成外部组件。
 
 ---
 
-## 设计文档
+## 16. 项目文件说明
 
-更完整的架构说明见：
+- `src/content_memory_mcp/`：核心代码
+- `project.md`：项目整体设计说明
+- `.env.example`：环境变量示例
+- `install.sh`：一键安装脚本
+- `start.sh`：启动脚本
+- `deploy/nginx.content-memory-mcp.conf.example`：反代配置示例
+- `scripts/install_smoke.py`：安装自检脚本
+- `tests/`：测试集
 
-- `project.md`
+如果你要看系统设计，不看版本说明，优先读：
+
+1. `README.md`
+2. `project.md`

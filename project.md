@@ -1,410 +1,429 @@
 # content-memory-mcp 项目设计说明
 
-## 1. 项目定位
+## 1. 项目目标
 
-`content-memory-mcp` 是一套面向远程 MCP 场景的内容服务。
+这个项目的目标不是做一个“工具合集”，而是做一个**内容资产中台**，通过 MCP 暴露给 ChatGPT 或其他兼容客户端使用。
 
-它把两个原本分散的 skill 能力收敛成一套可部署、可检索、可被 ChatGPT 调用的服务：
+项目要同时满足三类内容形态：
 
-- 长期笔记能力
-- 微信公众号抓取与知识库能力
+1. **notes**：短笔记、碎片上下文、工作记忆
+2. **articles**：长文归档，尤其是 PDF / EPUB / Markdown / TXT 转成正文后的内容
+3. **weixin**：公众号文章、专辑和历史消息归档
 
-目标不是复制 skill 的提示词，而是提炼出更稳定的基础设施层：
-
-- 统一的 content API
-- 稳定的异步抓取
-- 主库与向量索引分层
-- MCP tools / resources / prompts 暴露
+这三类内容的边界必须清晰，否则后续检索、筛选、权限和维护都会变得混乱。
 
 ---
 
-## 2. 为什么不是继续堆 skill
+## 2. 为什么要拆成三类内容域
 
-skill 擅长做：
+### 2.1 notes
 
-- 触发语义
-- 默认流程
-- 输出模板
-- 模型的工作流引导
+`notes` 的本质是：
 
-但 skill 不适合长期承载这些职责：
+- 高频写入
+- 内容短
+- 结构轻
+- 更像个人工作记忆
 
-- 远程 HTTP 服务
-- 高负载抓取
-- 异步任务管理
-- 持久化 job 状态
-- 向量索引与重建
-- 域名、反代、远程 ChatGPT 接入
+它适合的问题是：
 
-所以项目采用的原则是：
+- “我昨天记了什么？”
+- “最近关于定价策略都记过哪些点？”
+- “帮我从笔记里提炼出结论”
 
-- **skill 留在上层**，负责表达“怎么用”
-- **MCP 留在下层**，负责表达“能做什么”
+### 2.2 articles
 
----
+`articles` 的本质是：
 
-## 3. 系统分层
+- 内容更长
+- 来源更像文档或资料
+- 更强调“保留正文”
+- 更适合被 RAG 检索和复用
 
-### 3.1 接入层
+它对应的是：
 
-负责：
-- MCP 协议
-- Streamable HTTP
-- stdio 兼容
-- session 管理
+- PDF 手册转文字归档
+- EPUB 电子书局部归档
+- GPT 已整理好的报告或文章
+- 长篇故事、方法论、产品文档、商业分析
 
-核心文件：
-- `http_server.py`
-- `server.py`
-- `main.py`
+这一层是本次 1.3.0 新增的核心优化。
 
-### 3.2 编排层
+**它不是 notes 的子集。**  
+把 PDF、EPUB、课程讲义都塞进 notes，只会把笔记库搞脏。
 
-负责：
-- tool 注册
-- resource 暴露
-- prompt 暴露
-- app context 初始化
-- job 队列注入
+### 2.3 weixin
 
-核心文件：
-- `tooling.py`
-- `resources.py`
-- `prompts.py`
+`weixin` 的本质是：
 
-### 3.3 业务层
+- 外部抓取数据源
+- 有账号、专辑、历史消息等概念
+- 除了正文之外，还要保留归档结构和知识库构建能力
 
-负责：
-- notes 业务
-- weixin 业务
-- jobs 异步任务
+它对应的是：
 
-核心文件：
-- `services/notes.py`
-- `services/weixin.py`
-- `jobs.py`
-
-### 3.4 存储层
-
-负责：
-- 本地 JSON / Markdown / HTML 持久化
-- Qdrant 索引
-- registry / account info / KB 文件
-
-核心文件：
-- `vendor/storage_json.py`
-- `vendor/weixin_lib.py`
-- `rag.py`
+- 单篇公众号文章
+- 专辑/专栏
+- 历史消息列表
+- 公众号语料沉淀与风格分析
 
 ---
 
-## 4. 数据边界
+## 3. 总体架构
 
-### 4.1 主库
+```text
+Client (ChatGPT / MCP client)
+        |
+        v
+Remote MCP HTTP Server
+        |
+        +-- Tool Router
+        +-- Resource Router
+        +-- Prompt Templates
+        |
+        +-- NotesService
+        +-- ArticleService
+        +-- WeixinService
+        +-- JobStore / Worker
+        |
+        +-- Main Storage (local files)
+        +-- QdrantRAG
+        +-- Embedding Provider
+```
 
-主库是内容真相源。
+### 3.1 核心分层
 
-#### notes
-- JSONL / JSON catalog
-- 保存原文、摘要、事实、标签
+#### 主库存储
+负责保存：
 
-#### weixin
-- Markdown 正文
-- HTML 原文
-- JSON 元数据
-- registry / account info / reports / KB
+- 原始正文
+- 结构化元数据
+- registry / index
 
-### 4.2 Qdrant
+这是唯一真相源。
 
-Qdrant 只负责：
+#### Qdrant
+负责保存：
 
-- chunk 向量存储
+- chunk 向量
+- payload 元数据
 - 相似度检索
-- payload 过滤
-- 文档级聚合的召回基础
 
-Qdrant 不负责：
+它不是主库，而是召回层。
 
-- 原文真相
-- 富文本展示
-- 账号知识库文件管理
+#### Embedding Provider
+负责：
 
-### 4.3 Embedding
+- 文本向量化
 
-项目默认按“真实 embedding + Qdrant”设计。
-
-约束原则：
-
-- 向量维度固定
-- collection 按域拆开
-- 不把 hash embedding 当长期方案
+当前默认走 OpenAI 兼容 `/embeddings` 接口。
 
 ---
 
-## 5. Qdrant 设计
+## 4. 为什么 Qdrant 不能当主库
 
-### 5.1 为什么 notes 和 weixin 分 collection
+这个判断是故意的。
 
-不是为了看起来整齐，而是因为它们在三方面不同：
+如果把 Qdrant 当主库，会有几个问题：
 
-1. 语料结构不同
-2. metadata 结构不同
-3. 检索语义不同
+1. payload 不是为了长期演化设计的内容模型
+2. 重建 embedding 或更换 collection 时会很痛
+3. 你会把“索引结构”和“内容真相源”绑死
 
-当前默认：
+所以这里的原则是：
+
+- 主库保存原文
+- Qdrant 保存可重建的索引
+
+也就是说：
+
+- embedding 模型可以换
+- collection 可以重建
+- 主内容不应该丢
+
+---
+
+## 5. 存储设计
+
+### 5.1 notes
+
+沿用 JSON 主库存储，适合高频轻量写入。
+
+### 5.2 articles
+
+`articles` 采用“**文章目录 + Markdown 正文 + meta.json + registry**”的设计。
+
+原因：
+
+- 比 JSONL 更适合长文正文
+- 更接近 weixin 的正文归档思路
+- 单篇读取更自然
+- 便于后续扩展原始附件、摘要、翻译稿、衍生版本
+
+目录结构大致是：
+
+```text
+content_articles/
+  libraries/
+    articles/
+      <article_id>/
+        article.md
+        meta.json
+      article-registry.json
+```
+
+### 5.3 weixin
+
+沿用公众号域已有的归档布局，保留：
+
+- 文章正文
+- HTML / JSON / Markdown
+- registry
+- account KB
+- global KB
+
+---
+
+## 6. RAG 设计
+
+### 6.1 为什么分三个 collection
+
+当前默认使用三个 collection：
 
 - `content_memory_notes_chunks`
+- `content_memory_articles_chunks`
 - `content_memory_weixin_chunks`
 
-### 5.2 为什么不建议一开始按产品/UI/商业/故事分 collection
+这样分的原因：
 
-这些更适合做：
+1. 三类内容语料分布不同
+2. payload 字段不同
+3. 查询意图不同
+4. 后续扩展策略不同
+
+这比“全扔一个大 collection”更稳定，也更好调。
+
+### 6.2 为什么不按 product / ui / business / story 分 collection
+
+这类维度更适合做：
 
 - `library`
 - `tags`
 - `category`
-- `project`
 
-而不是物理分库。
+而不是直接拆 collection。
 
 原因：
 
-- 跨类检索更常见
-- 分库会增加运维复杂度
-- 小数据量时拆库反而降低检索整体性
+- 这些分类通常是业务视角，不是技术隔离边界
+- 跨分类检索很常见
+- 拆太细会让索引、重建和召回变复杂
 
-只有在这些场景才值得单独建 collection：
+所以当前建议：
 
-- 权限隔离
-- 生命周期差异大
-- 不同 embedding 模型 / 维度
-- 量级特别大
+- `notes/articles/weixin` 按域分 collection
+- 具体主题通过 metadata 过滤
 
 ---
 
-## 6. RAG 链路
+## 7. 为什么 articles 需要两条导入路径
 
-### 6.1 写入
+远程 ChatGPT 场景有个现实问题：
 
-#### notes
-1. 记录写入 JSON 主库
-2. 组合检索文本
-3. chunk
-4. embedding
-5. upsert 到 Qdrant
+**上传给 ChatGPT 的文件，不一定会原样透传给你的远程 MCP。**
 
-#### weixin
-1. 抓取文章
-2. 保存 HTML / JSON / Markdown
-3. 更新 registry
-4. 抽取纯文本
-5. chunk
-6. embedding
-7. upsert 到 Qdrant
+所以 1.3.0 的 `articles` 设计故意做成双通道：
 
-### 6.2 查询
+### 路径 A：`articles.save_text`
 
-1. query embedding
-2. Qdrant top-k 检索
-3. 按 doc/article 聚合
-4. 返回文档级命中
-5. 必要时返回 chunk 级上下文
+适合：
 
-### 6.3 重建
+- GPT 已经把 PDF / EPUB / HTML 转成文本
+- 现在只想把正文归档
 
-只要主库还在：
+这是最稳的路径，因为它不依赖附件透传。
 
-- 可以重切 chunk
-- 可以换 embedding
-- 可以重建 Qdrant
+### 路径 B：`articles.ingest_file` / `articles.ingest_base64`
 
-这就是主库与索引层分离的价值。
+适合：
+
+- 你自己的集成层
+- 本地部署环境
+- 外部服务已经拿到了文件字节流
+
+这条路负责直接解析：
+
+- PDF
+- EPUB
+- Markdown
+- TXT
+- HTML
 
 ---
 
-## 7. 为什么 1.2.0 引入任务队列
+## 8. 为什么 articles 的文件导入走任务队列
 
-### 7.1 原同步模式的问题
+长文导入和公众号抓取有一个共同点：
 
-原先的抓取接口把以下动作塞进一次调用：
+- 处理时间可能偏长
+- 可能要做文件读取、解析、索引
+- 不适合把所有事情都压在一次同步 HTTP 请求里
 
-- 网络抓取
-- 文件写入
-- registry 更新
-- RAG 写入
-- KB 构建
-- 返回结果
+所以：
 
-这在远程 ChatGPT 场景里会放大四类问题：
+- `articles.save_text` 保持同步
+- `articles.ingest_file` 走异步队列
+- `articles.ingest_base64` 走异步队列
+- `weixin.fetch_*` 走异步队列
 
-1. 超时
-2. 高频重复重建 KB
-3. 返回结构混入本地路径
-4. 一次失败掩盖真实入库状态
+这条分界线是有意的：
 
-### 7.2 1.2.0 的策略
-
-抓取类工具改成：
-
-- 提交任务
-- 返回 `job_id`
-- 后台单 worker 串行执行
-- 客户端通过 `jobs.get` 或 `content-memory://jobs/{job_id}` 查询
-
-### 7.3 为什么先用单 worker
-
-这是稳定性优先的设计。
-
-当前公众号抓取的主要瓶颈不是 CPU，而是：
-
-- 网络请求
-- 文件 I/O
-- 索引写入
-- KB 构建
-
-在这个阶段提高并发，不会线性提高吞吐，反而更容易出现账号级竞态。
-
-所以第一阶段采用：
-
-- 全局 FIFO
-- 单 worker
-- 串行执行
-
-后续再考虑：
-
-- account 级队列
-- 不同账号并行
+- 轻操作同步
+- 重操作异步
 
 ---
 
-## 8. KB 的 dirty / debounce 机制
+## 9. 任务队列设计
 
-### 8.1 原问题
+当前 `JobStore` 的定位是：
 
-“每抓一篇文章就立即重建 KB” 会导致：
+**高健壮单机任务队列**
 
-- 同账号重复工作
-- 磁盘 I/O 激增
-- 请求耗时失控
-- 高频使用下状态不稳定
+主要能力：
 
-### 8.2 当前方案
+- 本地持久化
+- 原子写入 job 状态
+- 单 worker 串行执行
+- 高频重复提交去重
+- 失败重试（针对抓取类任务）
+- worker 崩溃后重启恢复
 
-抓取任务如果声明 `rebuild_kb=true`：
+### 为什么现在只做单 worker
 
-- 不同步重建 KB
-- 只标记 `kb_dirty`
-- 后台根据 `CONTENT_MEMORY_MCP_WEIXIN_KB_DEBOUNCE_SECONDS` 延迟创建重建任务
+因为你当前最需要的是：
 
-### 8.3 设计收益
+- 稳定
+- 状态一致
+- 避免竞态
 
-- 抓取链路更短
-- 高频写入时 KB 重建次数大幅下降
-- 状态更接近“最终一致”而不是“每次都硬同步”
+不是“表面并发”。
 
----
-
-## 9. 为什么要去本地路径化
-
-远程 ChatGPT 并不能读你服务器本地路径。
-
-所以这些东西不应该出现在远程工具返回里：
-
-- `local_markdown_path`
-- `local_html_path`
-- `local_json_path`
-- `kb_dir`
-- `style_profile`
-- `/KB/...`
-
-否则客户端很可能会把它误解为可读取资源，最后报：
-
-- `Resource not found`
-
-所以 1.2.0 的原则是：
-
-- 对外结果只返回**资源 URI**或摘要信息
-- 真正内容通过 `resources/read` 暴露
+特别是公众号抓取和 KB 重建，本身就不适合粗暴多并发。
 
 ---
 
-## 10. MCP 资源设计
+## 10. 为什么抓取结果不能返回本地路径
 
-### 10.1 为什么要有 jobs resource
+远程 MCP 返回本地绝对路径是错误设计。
 
-异步抓取之后，最自然的查询方式不是继续拼工具调用，而是读取 job 资源：
+原因：
 
-- `content-memory://jobs/{job_id}`
+1. ChatGPT 不能直接访问你服务器本地文件系统
+2. 客户端容易把路径误当成资源地址
+3. 高频情况下会引发 `Resource not found` 一类误报
 
-这样客户端可以把 job 当成可读对象，而不是必须自己理解内部状态文件。
+所以当前原则是：
 
-### 10.2 文章资源
+- tool 返回结构化摘要
+- 需要读取内容时返回 `resource_uri`
+- 真正内容通过 `resources/read` 获取
 
-文章正文资源：
-
-- `content-memory://weixin/article/{account_slug}/{uid}`
-
-这样抓取结果只需要返回：
-
-- `resource_uri`
-
-客户端按需再去读取正文。
+这也是为什么后续所有可读内容都应资源化。
 
 ---
 
-## 11. 当前已知边界
+## 11. MCP 层设计
 
-### 已完成
+### 11.1 tools
+
+负责：
+
+- 写入动作
+- 检索动作
+- 队列提交
+- 重建索引
+
+### 11.2 resources
+
+负责：
+
+- 读取正文
+- 读取列表
+- 读取 job 状态
+- 读取账号内容
+
+### 11.3 prompts
+
+负责：
+
+- 提供给客户端更自然的任务模板
+
+这样拆开以后：
+
+- tool 是能力原语
+- resource 是上下文入口
+- prompt 是自然语言工作流入口
+
+---
+
+## 12. 1.3.0 的新增价值
+
+1. 新增 `articles` 内容域
+2. 支持 PDF / EPUB / Markdown / TXT / HTML 导入
+3. 支持“GPT 先转文字，再保存成长文”的远程稳定链路
+4. 保持与 notes、weixin 并列，而不是硬塞进笔记系统
+5. 文章库也接入了独立 RAG collection 和资源 URI
+
+从系统视角看，这一步把项目从：
+
+- “笔记 + 微信”
+
+推进到了：
+
+- “笔记 + 长文资料 + 微信语料”
+
+这才像完整的内容资产中台。
+
+---
+
+## 13. 当前边界
+
+当前系统已经够稳定，但边界也要说清楚。
+
+### 当前适合
+
+- 单机部署
 - 远程 HTTP MCP
-- notes / weixin / jobs 三域工具
-- Qdrant RAG
-- 微信公众号抓取队列
-- WeSpy 核心能力对齐
-- 返回去本地路径化
-- KB dirty / debounce
+- Qdrant 做向量索引
+- 一台机器独占数据目录
+- Nginx / Caddy 反向代理给 ChatGPT
 
-### 仍然保守的地方
-- 全局单 worker
-- 没有完整的重试 / 死信队列
-- KB 资源还没完全资源化
-- 监控与指标还比较轻
+### 当前不适合
 
----
+- 多实例共享本地 job store
+- 分布式锁协调
+- 多 worker 并行写同一数据目录
 
-## 12. 下一步更合理的演进方向
+所以当前准确定位是：
 
-1. **账号级串行队列**
-   - 同一账号串行
-   - 不同账号并行
-
-2. **KB 资源化补齐**
-   - `style-profile`
-   - `style-playbook`
-   - `fulltext-analysis`
-
-3. **失败重试与退避**
-   - 抓取失败自动退避
-   - 区分网络失败 / 解析失败 / 存储失败
-
-4. **更细粒度的权限与可观测性**
-   - job metrics
-   - queue depth
-   - per-account health
-
-5. **更强的过滤检索**
-   - category / tags / project / stage 过滤
-   - notes 全局检索与多 library 检索
+**高健壮单机版 remote MCP 内容中台**
 
 ---
 
-## 13. 项目判断
+## 14. 下一步可演进方向
 
-这个项目的核心价值，不在于“又写了一个抓公众号脚本”，而在于它把原本零散的 skill 能力，收束成了：
+1. `articles` 增加原始附件留存
+2. `articles` 增加更细的 metadata，如 `category/project/stage`
+3. 把更多 KB 文件暴露成正式 resources
+4. queue 从全局串行升级为“账号/库级串行”
+5. 如需多实例，再迁到外部 job store / Redis / DB
 
-- 能部署
-- 能反代
-- 能被 ChatGPT 调用
-- 能追踪状态
-- 能做长期 RAG
+---
 
-这才是一个可持续的内容基础设施，而不是一堆脚本加几段 prompt。
+## 15. 结论
+
+整个项目的核心设计原则可以压成一句话：
+
+**按内容域分层，把正文留在主库，把语义留给 Qdrant，把远程调用收敛到 MCP，把重操作放进队列。**
+
+这比把所有东西都塞进一个“万能笔记库”或“万能 collection”要稳得多。

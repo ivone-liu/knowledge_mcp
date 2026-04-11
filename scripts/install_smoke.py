@@ -43,6 +43,7 @@ def main() -> int:
         env["PYTHONPATH"] = str(root / "src")
         env["CONTENT_MEMORY_MCP_NOTES_ROOT"] = str(tmp_path / "notes")
         env["CONTENT_MEMORY_MCP_WEIXIN_ROOT"] = str(tmp_path / "weixin")
+        env["CONTENT_MEMORY_MCP_ARTICLES_ROOT"] = str(tmp_path / "articles")
         env["CONTENT_MEMORY_MCP_QDRANT_MODE"] = "local"
         env["CONTENT_MEMORY_MCP_QDRANT_PATH"] = str(tmp_path / "qdrant")
         env["CONTENT_MEMORY_MCP_EMBEDDING_PROVIDER"] = "mock"
@@ -76,7 +77,7 @@ def main() -> int:
             if not session_id:
                 raise RuntimeError("初始化未返回 Mcp-Session-Id")
             payload = init.json()
-            if payload["result"]["serverInfo"]["version"] != "1.2.0.post1":
+            if payload["result"]["serverInfo"]["version"] != "1.3.1":
                 raise RuntimeError("服务器版本不正确")
             headers["Mcp-Session-Id"] = session_id
             notify = requests.post(
@@ -107,6 +108,16 @@ def main() -> int:
             hits = search.json()["result"]["structuredContent"].get("hits") or []
             if not hits:
                 raise RuntimeError("notes.search 未返回结果")
+            article_add = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "articles.save_text", "arguments": {"text": "# 安装自检文章\n\n这是 PDF/EPUB 转文字后的归档内容。", "title": "安装自检文章"}}},
+                timeout=10,
+            )
+            article_add.raise_for_status()
+            article_payload = article_add.json()["result"]["structuredContent"]
+            if not article_payload["ok"]:
+                raise RuntimeError("articles.save_text 失败")
             return 0
         finally:
             proc.terminate()

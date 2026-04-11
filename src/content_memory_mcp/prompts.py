@@ -31,6 +31,23 @@ def list_prompts() -> list[dict[str, Any]]:
             ],
         },
         {
+            "name": "archive_article_text",
+            "title": "保存长文内容",
+            "description": "把 PDF/EPUB 转写后的长文本保存到文章库，而不是 notes。",
+            "arguments": [
+                {"name": "text", "description": "要保存的长文正文", "required": True},
+                {"name": "title", "description": "可选标题", "required": False},
+            ],
+        },
+        {
+            "name": "search_articles",
+            "title": "检索文章库",
+            "description": "围绕主题检索文章库并返回最相关的长文内容。",
+            "arguments": [
+                {"name": "query", "description": "检索主题", "required": True},
+            ],
+        },
+        {
             "name": "archive_weixin_article",
             "title": "归档公众号文章",
             "description": "按公众号文章 URL 抓取并入库。",
@@ -64,6 +81,13 @@ def get_prompt(name: str, arguments: dict[str, str] | None = None) -> dict[str, 
     elif name == "ask_notes_rag":
         query = args.get("query", "")
         prompt = f"请先调用 notes.retrieve_context 检索与“{query}”最相关的 chunk，上下文返回后只基于这些内容回答，回答中注明你引用的是哪几条笔记。"
+    elif name == "archive_article_text":
+        text = args.get("text", "")
+        title = args.get("title", "")
+        prompt = f"请调用 articles.save_text 保存以下长文内容。标题：{title or '无'}。正文：{text}"
+    elif name == "search_articles":
+        query = args.get("query", "")
+        prompt = f"请先调用 articles.search 检索“{query}”，必要时再调用 articles.retrieve_context 取回 chunk 上下文，然后只基于这些内容回答。"
     elif name == "archive_weixin_article":
         url = args.get("url", "")
         slug = args.get("account_slug", "")

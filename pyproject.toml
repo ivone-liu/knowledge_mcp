@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "content-memory-mcp"
-version = "1.2.0.post1"
-description = "Unified MCP server for WeChat corpus ingestion and long-term notes"
+version = "1.3.1"
+description = "Unified MCP server for WeChat corpus ingestion, article archiving, and long-term notes"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -13,11 +13,13 @@ dependencies = [
   "beautifulsoup4>=4.12.0",
   "qdrant-client>=1.9.0",
   "fastapi>=0.115.0",
-  "uvicorn>=0.30.0"
+  "uvicorn>=0.30.0",
+  "pypdf>=5.0.0",
+  "ebooklib>=0.18"
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0.0"]
+test = ["pytest>=8.0.0", "reportlab>=4.0.0"]
 
 [project.scripts]
 content-memory-mcp = "content_memory_mcp.main:main"

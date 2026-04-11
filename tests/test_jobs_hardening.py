@@ -49,3 +49,22 @@ def test_job_store_deduplicates_active_fetch_jobs(tmp_path: Path):
     assert second.get('_deduped') is True
     done = _wait(store, first['job_id'])
     assert done['status'] == 'completed'
+
+
+
+def test_job_store_retries_transient_article_ingest_failure(tmp_path: Path):
+    store = JobStore(JobStoreSettings(root=tmp_path / 'jobs', article_max_attempts=2, retry_backoff_seconds=0.05, retry_backoff_multiplier=1.0))
+    attempts = {'count': 0}
+
+    def flaky(payload: dict) -> dict:
+        attempts['count'] += 1
+        if attempts['count'] == 1:
+            raise OSError('temporary file lock')
+        return {'ok': True, 'action': 'articles.ingest_file', 'article': {'id': 'a1'}}
+
+    store.register('articles.ingest_file', flaky)
+    job = store.submit('articles.ingest_file', {'file_path': '/tmp/demo.txt'})
+    done = _wait(store, job['job_id'])
+    assert done['status'] == 'completed'
+    assert done['attempts'] == 2
+    assert any(item.get('stage') == 'job_retry' for item in done.get('warnings', []))

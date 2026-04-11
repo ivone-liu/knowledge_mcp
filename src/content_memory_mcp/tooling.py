@@ -4,8 +4,9 @@ import threading
 from typing import Any
 
 from .jobs import JobStore, JobStoreSettings
-from .paths import detect_notes_root, detect_qdrant_base_dir, detect_weixin_root
+from .paths import detect_articles_root, detect_notes_root, detect_qdrant_base_dir, detect_weixin_root
 from .rag import QdrantRAG, RagSettings
+from .services.articles import ArticleService
 from .services.notes import NotesService
 from .services.weixin import WeixinService
 from .vendor.weixin_lib import slugify
@@ -19,11 +20,13 @@ class _SharedCore:
         settings = RagSettings.from_env(default_base_dir=detect_qdrant_base_dir())
         self.rag = QdrantRAG(settings)
         self.notes = NotesService(detect_notes_root(), rag=self.rag)
+        self.articles = ArticleService(detect_articles_root(), rag=self.rag)
         self.weixin = WeixinService(detect_weixin_root(), rag=self.rag)
         jobs_root = self.weixin.root / '_jobs'
         _os = __import__('os')
         debounce = float(_os.getenv('CONTENT_MEMORY_MCP_WEIXIN_KB_DEBOUNCE_SECONDS', '45').strip() or '45')
         fetch_attempts = int(_os.getenv('CONTENT_MEMORY_MCP_JOB_FETCH_MAX_ATTEMPTS', '3').strip() or '3')
+        article_attempts = int(_os.getenv('CONTENT_MEMORY_MCP_JOB_ARTICLE_MAX_ATTEMPTS', '2').strip() or '2')
         internal_attempts = int(_os.getenv('CONTENT_MEMORY_MCP_JOB_INTERNAL_MAX_ATTEMPTS', '2').strip() or '2')
         retry_backoff = float(_os.getenv('CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_SECONDS', '1').strip() or '1')
         retry_multiplier = float(_os.getenv('CONTENT_MEMORY_MCP_JOB_RETRY_BACKOFF_MULTIPLIER', '2').strip() or '2')
@@ -32,6 +35,7 @@ class _SharedCore:
                 root=jobs_root,
                 kb_rebuild_debounce_seconds=debounce,
                 fetch_max_attempts=fetch_attempts,
+                article_max_attempts=article_attempts,
                 internal_max_attempts=internal_attempts,
                 retry_backoff_seconds=retry_backoff,
                 retry_backoff_multiplier=retry_multiplier,
@@ -54,6 +58,8 @@ class _SharedCore:
 
     def _register_job_handlers(self) -> None:
         self.jobs.register('weixin.fetch_article', self._job_fetch_article)
+        self.jobs.register('articles.ingest_file', self._job_articles_ingest_file)
+        self.jobs.register('articles.ingest_base64', self._job_articles_ingest_base64)
         self.jobs.register('weixin.fetch_album', self._job_fetch_album)
         self.jobs.register('weixin.fetch_history', self._job_fetch_history)
         self.jobs.register('weixin.batch_fetch', self._job_batch_fetch)
@@ -92,6 +98,16 @@ class _SharedCore:
                 self.jobs.mark_kb_dirty(slug)
         return result
 
+    def _job_articles_ingest_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.articles.ingest_file(**payload)
+        result['deferred'] = True
+        return result
+
+    def _job_articles_ingest_base64(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.articles.ingest_base64(**payload)
+        result['deferred'] = True
+        return result
+
     def _job_rebuild_kb(self, payload: dict[str, Any]) -> dict[str, Any]:
         slug = (payload.get('account_slug') or '').strip()
         if not slug:
@@ -107,6 +123,7 @@ class AppContext:
         core = _SharedCore.get()
         self.rag = core.rag
         self.notes = core.notes
+        self.articles = core.articles
         self.weixin = core.weixin
         self.jobs = core.jobs
 
@@ -180,6 +197,7 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
                 'ok': True,
                 'action': 'system.health',
                 'notes': ctx.notes.health(),
+                'articles': ctx.articles.health(),
                 'weixin': ctx.weixin.health(),
                 'rag': ctx.rag.health(),
                 'jobs': ctx.jobs.health(),
@@ -262,6 +280,71 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
             'description': '将 JSON 主库存量笔记重新切块并写入 Qdrant。',
             'inputSchema': _schema({'library': {'type': 'string'}}),
             'handler': lambda args: ctx.notes.rebuild_index(library=args.get('library')),
+        },
+        'articles.save_text': {
+            'title': '保存长文内容',
+            'description': '把已经整理好的长文本、PDF 转写结果或 EPUB 转写结果保存为文章，不写入 notes。适合 GPT 已经把文件转成文字后归档。',
+            'inputSchema': _schema({'text': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_type': {'type': 'string', 'description': '如 pdf-text、epub-text、manual-article'}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}, 'content_format': {'type': 'string', 'enum': ['markdown', 'plain_text']}}, ['text']),
+            'handler': lambda args: ctx.articles.save_text(text=args['text'], title=args.get('title'), summary=args.get('summary'), library=args.get('library', 'articles'), tags=args.get('tags'), source_type=args.get('source_type', 'text'), source_ref=args.get('source_ref'), author=args.get('author'), content_format=args.get('content_format', 'markdown')),
+        },
+        'articles.ingest_file': {
+            'title': '排队导入本地文件为文章',
+            'description': '将服务器本地可访问的 PDF、EPUB、Markdown、TXT 或 HTML 文件导入为文章。适合本地部署场景。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}, ['file_path']),
+            'handler': lambda args: _enqueue_payload('articles.ingest_file', {
+                'file_path': args['file_path'],
+                'title': args.get('title'),
+                'summary': args.get('summary'),
+                'library': args.get('library', 'articles'),
+                'tags': args.get('tags'),
+                'source_ref': args.get('source_ref'),
+                'author': args.get('author'),
+            }, ctx),
+        },
+        'articles.ingest_base64': {
+            'title': '排队导入 Base64 文件为文章',
+            'description': '将 Base64 编码的 PDF、EPUB、Markdown、TXT 或 HTML 文件导入为文章。适合外部系统已经拿到文件字节流时使用。',
+            'inputSchema': _schema({'filename': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}, ['filename', 'content_base64']),
+            'handler': lambda args: _enqueue_payload('articles.ingest_base64', {
+                'filename': args['filename'],
+                'content_base64': args['content_base64'],
+                'title': args.get('title'),
+                'summary': args.get('summary'),
+                'library': args.get('library', 'articles'),
+                'tags': args.get('tags'),
+                'source_ref': args.get('source_ref'),
+                'author': args.get('author'),
+            }, ctx),
+        },
+        'articles.list_recent': {
+            'title': '查看近期文章',
+            'description': '列出近期保存的长文内容，独立于 notes 与 weixin。',
+            'inputSchema': _schema({'library': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}),
+            'handler': lambda args: ctx.articles.list_recent(library=args.get('library'), limit=int(args.get('limit', 20))),
+        },
+        'articles.search': {
+            'title': '检索文章库',
+            'description': '在文章库中做 RAG 检索，适合 PDF/EPUB 转写后的长文内容。',
+            'inputSchema': _schema({'query': {'type': 'string'}, 'library': {'type': 'string'}, 'limit': {'type': 'integer'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}}, ['query']),
+            'handler': lambda args: ctx.articles.search(query=args['query'], library=args.get('library'), limit=int(args.get('limit', 8)), tags=args.get('tags')),
+        },
+        'articles.retrieve_context': {
+            'title': '为文章库提取 RAG 上下文',
+            'description': '返回文章库的 chunk 级检索结果，适合摘要、问答和改写。',
+            'inputSchema': _schema({'query': {'type': 'string'}, 'library': {'type': 'string'}, 'limit': {'type': 'integer'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}}, ['query']),
+            'handler': lambda args: ctx.articles.retrieve_context(query=args['query'], library=args.get('library'), limit=int(args.get('limit', 6)), tags=args.get('tags')),
+        },
+        'articles.get': {
+            'title': '读取文章',
+            'description': '按文章 ID 读取完整 Markdown 正文与元数据。',
+            'inputSchema': _schema({'article_id': {'type': 'string'}, 'library': {'type': 'string'}}, ['article_id']),
+            'handler': lambda args: ctx.articles.get(article_id=args['article_id'], library=args.get('library')),
+        },
+        'articles.rebuild_index': {
+            'title': '重建文章向量索引',
+            'description': '把文章库存量内容重新切块并写入 Qdrant。',
+            'inputSchema': _schema({'library': {'type': 'string'}}),
+            'handler': lambda args: ctx.articles.rebuild_index(library=args.get('library')),
         },
         'weixin.fetch_article': {
             'title': '排队抓取公众号单篇文章',
