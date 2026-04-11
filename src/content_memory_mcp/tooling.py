@@ -187,6 +187,46 @@ def _enqueue_payload(action: str, payload: dict[str, Any], ctx: AppContext) -> d
     }
 
 
+def _enqueue_article_import(file_kind: str, args: dict[str, Any], ctx: AppContext) -> dict[str, Any]:
+    kind = file_kind.lower().lstrip('.')
+    title = args.get('title')
+    summary = args.get('summary')
+    library = args.get('library', 'articles')
+    tags = args.get('tags')
+    source_ref = args.get('source_ref')
+    author = args.get('author')
+    file_path = args.get('file_path')
+    content_base64 = args.get('content_base64')
+    filename = args.get('filename')
+    if file_path and content_base64:
+        raise ValueError('file_path 和 content_base64 只能二选一')
+    if file_path:
+        return _enqueue_payload('articles.ingest_file', {
+            'file_path': file_path,
+            'title': title,
+            'summary': summary,
+            'library': library,
+            'tags': tags,
+            'source_ref': source_ref,
+            'author': author,
+        }, ctx)
+    if content_base64:
+        effective_filename = filename or f'upload.{kind}'
+        if not str(effective_filename).lower().endswith(f'.{kind}'):
+            effective_filename = f'{effective_filename}.{kind}'
+        return _enqueue_payload('articles.ingest_base64', {
+            'filename': effective_filename,
+            'content_base64': content_base64,
+            'title': title,
+            'summary': summary,
+            'library': library,
+            'tags': tags,
+            'source_ref': source_ref,
+            'author': author,
+        }, ctx)
+    raise ValueError('必须提供 file_path 或 content_base64 其中之一')
+
+
 def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
     return {
         'system.health': {
@@ -315,6 +355,24 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
                 'source_ref': args.get('source_ref'),
                 'author': args.get('author'),
             }, ctx),
+        },
+        'articles.ingest_pdf': {
+            'title': '导入 PDF 为文章',
+            'description': '显式导入 PDF 文档。可传服务器本地 file_path，或传 content_base64 + filename。适合把 PDF 归档到 articles，而不是 notes。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'handler': lambda args: _enqueue_article_import('pdf', args, ctx),
+        },
+        'articles.ingest_epub': {
+            'title': '导入 EPUB 为文章',
+            'description': '显式导入 EPUB 文档。可传服务器本地 file_path，或传 content_base64 + filename。适合电子书、长文合集归档。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'handler': lambda args: _enqueue_article_import('epub', args, ctx),
+        },
+        'articles.ingest_txt': {
+            'title': '导入 TXT 为文章',
+            'description': '显式导入 TXT 文本文件。可传服务器本地 file_path，或传 content_base64 + filename。适合 OCR 结果、纯文本稿、整理后的长文。',
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'handler': lambda args: _enqueue_article_import('txt', args, ctx),
         },
         'articles.list_recent': {
             'title': '查看近期文章',

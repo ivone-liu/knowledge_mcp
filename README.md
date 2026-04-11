@@ -586,3 +586,24 @@ MCP 路径默认是：
 
 1. `README.md`
 2. `project.md`
+
+
+## 显式文件导入接口
+
+除了通用的 `articles.ingest_file` 与 `articles.ingest_base64`，项目还显式提供下面 3 个面向文档类型的工具，便于在 ChatGPT 或其他 MCP 客户端里直接触发：
+
+- `articles.ingest_pdf`
+- `articles.ingest_epub`
+- `articles.ingest_txt`
+
+这 3 个工具都支持两种输入方式：
+
+1. `file_path`：服务器本地文件路径
+2. `content_base64` + `filename`：直接上传字节内容
+
+推荐用法：
+
+- PDF 先用 `articles.ingest_pdf`
+- EPUB 先用 `articles.ingest_epub`
+- TXT、OCR 结果、纯文本长文先用 `articles.ingest_txt`
+- 如果文件内容已经被 GPT 整理成正文，再用 `articles.save_text`

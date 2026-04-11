@@ -100,6 +100,9 @@ def test_mcp_http_roundtrip(temp_roots):
         tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
         assert "notes.retrieve_context" in tool_names
         assert "articles.save_text" in tool_names
+        assert "articles.ingest_pdf" in tool_names
+        assert "articles.ingest_epub" in tool_names
+        assert "articles.ingest_txt" in tool_names
         assert "system.health" in tool_names
 
         add = requests.post(
