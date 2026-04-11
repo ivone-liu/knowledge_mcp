@@ -88,6 +88,26 @@ def main() -> int:
             )
             if notify.status_code != 202:
                 raise RuntimeError(f"initialized notification 异常: {notify.status_code}")
+            tools = requests.post(
+                f"{base_url}/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 99, "method": "tools/list"},
+                timeout=5,
+            )
+            tools.raise_for_status()
+            tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
+            required_tools = {
+                "articles.save_text",
+                "articles.ingest_pdf",
+                "articles.ingest_epub",
+                "articles.ingest_txt",
+                "notes.add",
+                "notes.search",
+                "system.health",
+            }
+            missing = sorted(required_tools - tool_names)
+            if missing:
+                raise RuntimeError(f"tools/list 缺少关键工具: {', '.join(missing)}")
             add = requests.post(
                 f"{base_url}/mcp",
                 headers=headers,
