@@ -49,6 +49,7 @@ def test_explicit_article_tools_are_listed_and_work(temp_roots, tmp_path):
     ctx = AppContext()
     tools = build_tools(ctx)
     assert 'uploads.get' in tools
+    assert 'uploads.accept_base64' in tools
     assert 'uploads.list_recent' in tools
     assert 'articles.ingest_pdf' in tools
     assert 'articles.ingest_epub' in tools
@@ -103,3 +104,27 @@ def test_explicit_epub_tool_supports_upload_id(temp_roots, tmp_path):
     assert epub_done['status'] == 'completed'
     assert epub_done['result']['article']['source_type'] == 'epub'
     assert epub_done['result']['article']['source_ref'].startswith(f'upload:{upload_id}:')
+
+
+def test_uploads_accept_base64_returns_upload_id_and_epub_import_works(temp_roots, tmp_path):
+    _SharedCore.reset_for_tests()
+    ctx = AppContext()
+    tools = build_tools(ctx)
+
+    epub_path = tmp_path / 'tool-upload.epub'
+    _make_epub(epub_path, '工具上传', ['章节一', '章节二'])
+    encoded = base64.b64encode(epub_path.read_bytes()).decode('ascii')
+
+    upload = tools['uploads.accept_base64']['handler']({
+        'filename': 'tool-upload.epub',
+        'content_base64': encoded,
+        'content_type': 'application/epub+zip',
+    })
+    assert upload['ok'] is True
+    upload_id = upload['upload']['id']
+    assert upload['upload']['recommended_tool'] == 'articles.ingest_epub'
+
+    epub_job = tools['articles.ingest_epub']['handler']({'upload_id': upload_id, 'library': 'mcp-books'})
+    epub_done = _wait_job(ctx, epub_job['job_id'])
+    assert epub_done['status'] == 'completed'
+    assert epub_done['result']['article']['source_type'] == 'epub'

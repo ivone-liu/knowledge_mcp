@@ -306,6 +306,7 @@ job 文件使用临时文件 + `fsync` + `os.replace`，避免半截 JSON。
 ### 7.3 uploads
 
 - `uploads.get`
+- `uploads.accept_base64`
 - `uploads.list_recent`
 
 ### 7.4 articles
@@ -533,11 +534,17 @@ MCP 路径默认是：
 #### 场景 C：ChatGPT 拿到了文件，但拿不到服务器本地路径
 可以用：
 
-1. 先把文件上传到你的服务端 `POST /uploads`，或直接打开 `/upload` 页面选文件
+1. 优先让 ChatGPT 先调 `uploads.accept_base64`
 2. 拿到返回的 `upload_id`
 3. 再让 ChatGPT 调 `articles.ingest_pdf` / `articles.ingest_epub` / `articles.ingest_txt`，参数里只传 `upload_id`
 
 这样 ChatGPT 不需要知道服务器本地目录，也不需要把整个文件转成超长 Base64。
+
+如果你的客户端还不支持把聊天附件直接映射到 MCP 的 Base64 参数，再退回 HTTP 上传：
+
+1. 把文件上传到你的服务端 `POST /uploads`，或直接打开 `/upload` 页面选文件
+2. 拿到返回的 `upload_id`
+3. 再调用 `articles.ingest_pdf` / `articles.ingest_epub` / `articles.ingest_txt`
 
 ---
 
@@ -631,6 +638,10 @@ MCP 路径默认是：
 1. `file_path`：服务器本地文件路径
 2. `upload_id`：先经由 HTTP 上传入口把文件接收到服务端
 3. `content_base64` + `filename`：直接上传字节内容
+
+如果你要先由 MCP 接收文件字节流，可先调用：
+
+- `uploads.accept_base64`
 
 如果你要让人工直接上传，可打开：
 

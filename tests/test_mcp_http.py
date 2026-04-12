@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import socket
 import subprocess
@@ -142,6 +143,7 @@ def test_mcp_http_roundtrip(temp_roots):
         tools.raise_for_status()
         tool_names = {tool["name"] for tool in tools.json()["result"]["tools"]}
         assert "uploads.get" in tool_names
+        assert "uploads.accept_base64" in tool_names
         assert "uploads.list_recent" in tool_names
         assert "notes.retrieve_context" in tool_names
         assert "articles.save_text" in tool_names
@@ -209,6 +211,30 @@ def test_mcp_http_roundtrip(temp_roots):
         upload_tool.raise_for_status()
         assert upload_tool.json()["result"]["structuredContent"]["upload"]["filename"] == "http-upload.epub"
 
+        epub_path2 = temp_roots["articles"] / "http-upload-2.epub"
+        _make_epub(epub_path2, "HTTP 上传 2", ["第三段上传内容", "第四段上传内容"])
+        upload_base64_tool = session.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "tools/call",
+                "params": {
+                    "name": "uploads.accept_base64",
+                    "arguments": {
+                        "filename": "http-upload-2.epub",
+                        "content_type": "application/epub+zip",
+                        "content_base64": base64.b64encode(epub_path2.read_bytes()).decode("ascii"),
+                    },
+                },
+            },
+            timeout=10,
+        )
+        upload_base64_tool.raise_for_status()
+        upload2_id = upload_base64_tool.json()["result"]["structuredContent"]["upload"]["id"]
+        assert upload2_id
+
         ingest = session.post(
             f"{base_url}/mcp",
             headers=headers,
@@ -221,6 +247,18 @@ def test_mcp_http_roundtrip(temp_roots):
         assert job["status"] == "completed"
         assert job["result"]["article"]["source_type"] == "epub"
         assert job["result"]["article"]["source_ref"].startswith(f"upload:{upload_id}:")
+
+        ingest2 = session.post(
+            f"{base_url}/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 81, "method": "tools/call", "params": {"name": "articles.ingest_epub", "arguments": {"upload_id": upload2_id, "library": "uploaded-books"}}},
+            timeout=10,
+        )
+        ingest2.raise_for_status()
+        queued2 = ingest2.json()["result"]["structuredContent"]
+        job2 = _wait_job(base_url, session, headers, queued2["job_id"])
+        assert job2["status"] == "completed"
+        assert job2["result"]["article"]["source_ref"].startswith(f"upload:{upload2_id}:")
 
         delete = session.delete(f"{base_url}/mcp", headers={"Mcp-Session-Id": session_id}, timeout=5)
         assert delete.status_code == 204

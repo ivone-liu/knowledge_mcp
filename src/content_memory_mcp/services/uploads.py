@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -138,6 +139,22 @@ class UploadService:
         self._write_json_atomic(self._meta_path(upload_id), meta)
         self._save_registry_row(self._compact(meta))
         return {'ok': True, 'action': 'uploads.accept', 'upload': self._compact(meta)}
+
+    def accept_base64(self, *, filename: str, content_base64: str, content_type: str = '') -> dict[str, Any]:
+        encoded = coerce_text(content_base64).strip()
+        detected_type = coerce_text(content_type).strip()
+        if encoded.startswith('data:') and ',' in encoded:
+            header, encoded = encoded.split(',', 1)
+            encoded = encoded.strip()
+            if not detected_type and ';' in header:
+                detected_type = header[5:].split(';', 1)[0].strip()
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError('content_base64 不是有效的 Base64 内容') from exc
+        result = self.accept_bytes(filename=filename, content=raw, content_type=detected_type)
+        result['action'] = 'uploads.accept_base64'
+        return result
 
     def get(self, *, upload_id: str) -> dict[str, Any]:
         meta = self._read_meta(upload_id)

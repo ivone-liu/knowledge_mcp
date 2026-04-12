@@ -100,7 +100,7 @@ def list_resources(ctx: AppContext) -> list[dict[str, Any]]:
             'uri': 'content-memory://uploads/recent',
             'name': 'uploads-recent',
             'title': '近期上传',
-            'description': '最近通过 HTTP 上传入口接收的文件。',
+            'description': '最近通过 MCP 或 HTTP 上传入口接收的文件。',
             'mimeType': 'application/json',
         },
         {
@@ -135,6 +135,7 @@ def read_resource(ctx: AppContext, uri: str) -> dict[str, Any]:
                     'jobs.get',
                     'jobs.list',
                     'uploads.get',
+                    'uploads.accept_base64',
                     'uploads.list_recent',
                     'articles.save_text',
                     'articles.ingest_file',

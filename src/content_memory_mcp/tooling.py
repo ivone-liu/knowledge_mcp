@@ -138,6 +138,17 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
     return data
 
 
+def _base64_string_schema(description: str = '') -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        'type': 'string',
+        'contentEncoding': 'base64',
+        'contentMediaType': 'application/octet-stream',
+    }
+    if description:
+        schema['description'] = description
+    return schema
+
+
 def _weixin_save_props() -> dict[str, Any]:
     return {
         'save_html': {'type': 'boolean', 'description': '是否保存 HTML 原文'},
@@ -325,9 +336,26 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
             'inputSchema': _schema({'upload_id': {'type': 'string'}}, ['upload_id']),
             'handler': lambda args: ctx.uploads.get(upload_id=args['upload_id']),
         },
+        'uploads.accept_base64': {
+            'title': '接收 Base64 文件上传',
+            'description': '由 MCP 直接接收 Base64 编码文件字节，保存到服务端 uploads，并返回 upload_id。适合客户端无法暴露 file_path 时使用。',
+            'inputSchema': _schema(
+                {
+                    'filename': {'type': 'string', 'description': '原始文件名，如 book.epub 或 report.pdf'},
+                    'content_base64': _base64_string_schema('文件二进制内容的 Base64 字符串，也支持 data:...;base64,... 形式。'),
+                    'content_type': {'type': 'string', 'description': '可选 MIME 类型，如 application/epub+zip'},
+                },
+                ['filename', 'content_base64'],
+            ),
+            'handler': lambda args: ctx.uploads.accept_base64(
+                filename=args['filename'],
+                content_base64=args['content_base64'],
+                content_type=args.get('content_type', ''),
+            ),
+        },
         'uploads.list_recent': {
             'title': '查看最近上传',
-            'description': '列出最近通过 HTTP 上传入口接收的文件，便于后续用 upload_id 导入 articles。',
+            'description': '列出最近通过 MCP 或 HTTP 上传入口接收的文件，便于后续用 upload_id 导入 articles。',
             'inputSchema': _schema({'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}),
             'handler': lambda args: ctx.uploads.list_recent(limit=int(args.get('limit', 20))),
         },
@@ -406,7 +434,7 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
         'articles.ingest_base64': {
             'title': '排队导入 Base64 文件为文章',
             'description': '将 Base64 编码的 PDF、EPUB、Markdown、TXT 或 HTML 文件导入为文章。适合外部系统已经拿到文件字节流时使用。',
-            'inputSchema': _schema({'filename': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}, ['filename', 'content_base64']),
+            'inputSchema': _schema({'filename': {'type': 'string'}, 'content_base64': _base64_string_schema('文件二进制内容的 Base64 字符串。'), 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}, ['filename', 'content_base64']),
             'handler': lambda args: _enqueue_payload('articles.ingest_base64', {
                 'filename': args['filename'],
                 'content_base64': args['content_base64'],
@@ -421,19 +449,19 @@ def build_tools(ctx: AppContext) -> dict[str, dict[str, Any]]:
         'articles.ingest_pdf': {
             'title': '导入 PDF 为文章',
             'description': '显式导入 PDF 文档。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': _base64_string_schema('PDF 文件的 Base64 二进制内容。'), 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('pdf', args, ctx),
         },
         'articles.ingest_epub': {
             'title': '导入 EPUB 为文章',
             'description': '显式导入 EPUB 文档。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': _base64_string_schema('EPUB 文件的 Base64 二进制内容。'), 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('epub', args, ctx),
         },
         'articles.ingest_txt': {
             'title': '导入 TXT 为文章',
             'description': '显式导入 TXT 文本文件。可传服务器本地 file_path、已上传文件的 upload_id，或传 content_base64 + filename。',
-            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': {'type': 'string'}, 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
+            'inputSchema': _schema({'file_path': {'type': 'string'}, 'upload_id': {'type': 'string'}, 'content_base64': _base64_string_schema('TXT 文件的 Base64 二进制内容。'), 'filename': {'type': 'string'}, 'title': {'type': 'string'}, 'summary': {'type': 'string'}, 'library': {'type': 'string'}, 'tags': {'type': ['array', 'string'], 'items': {'type': 'string'}}, 'source_ref': {'type': 'string'}, 'author': {'type': 'string'}}),
             'handler': lambda args: _enqueue_article_import('txt', args, ctx),
         },
         'articles.list_recent': {
