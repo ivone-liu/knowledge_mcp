@@ -202,6 +202,14 @@ def test_mcp_http_roundtrip(temp_roots):
         upload_id = upload_payload["upload"]["id"]
         assert upload_payload["upload"]["recommended_tool"] == "articles.ingest_epub"
 
+        bad_upload = session.post(
+            f"{base_url}/uploads",
+            files={"file": ("broken.epub", b"not-a-zip", "application/epub+zip")},
+            timeout=10,
+        )
+        assert bad_upload.status_code == 400
+        assert "完整原始字节" in bad_upload.text
+
         upload_tool = session.post(
             f"{base_url}/mcp",
             headers=headers,

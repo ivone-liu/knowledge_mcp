@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from ebooklib import epub
+import pytest
 from reportlab.pdfgen import canvas
 
 from content_memory_mcp.tooling import AppContext, _SharedCore, build_tools
@@ -128,3 +129,18 @@ def test_uploads_accept_base64_returns_upload_id_and_epub_import_works(temp_root
     epub_done = _wait_job(ctx, epub_job['job_id'])
     assert epub_done['status'] == 'completed'
     assert epub_done['result']['article']['source_type'] == 'epub'
+
+
+def test_uploads_accept_base64_rejects_invalid_epub_bytes(temp_roots):
+    _SharedCore.reset_for_tests()
+    ctx = AppContext()
+    tools = build_tools(ctx)
+
+    bad_bytes = base64.b64encode(b'not-a-real-epub').decode('ascii')
+    with pytest.raises(ValueError, match='完整原始字节'):
+        tools['uploads.accept_base64']['handler']({
+            'filename': 'broken.epub',
+            'content_base64': bad_bytes,
+            'content_type': 'application/epub+zip',
+        })
+    assert ctx.uploads.list_recent()['count'] == 0

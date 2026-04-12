@@ -8,8 +8,12 @@ import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, ZipFile
+
+from pypdf import PdfReader
 
 
 UPLOADS_REGISTRY = 'upload-registry.json'
@@ -50,6 +54,37 @@ def recommended_tool(filename: str) -> str:
     if suffix in {'.txt', '.text'}:
         return 'articles.ingest_txt'
     return 'articles.ingest_file'
+
+
+def _validate_epub_bytes(raw: bytes) -> None:
+    try:
+        with ZipFile(BytesIO(raw)) as archive:
+            names = set(archive.namelist())
+            if 'mimetype' not in names:
+                raise ValueError('上传的 EPUB 缺少 mimetype 文件')
+            mimetype = archive.read('mimetype').decode('utf-8', errors='ignore').strip()
+            if mimetype != 'application/epub+zip':
+                raise ValueError('上传的 EPUB mimetype 无效')
+            if 'META-INF/container.xml' not in names:
+                raise ValueError('上传的 EPUB 缺少 META-INF/container.xml')
+    except BadZipFile as exc:
+        raise ValueError('上传的 EPUB 不是有效的 ZIP/EPUB 文件，通常说明没有拿到完整原始字节') from exc
+
+
+def _validate_pdf_bytes(raw: bytes) -> None:
+    try:
+        reader = PdfReader(BytesIO(raw))
+        _ = len(reader.pages)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError('上传的 PDF 无法解析，通常说明没有拿到完整原始字节') from exc
+
+
+def validate_upload_bytes(filename: str, raw: bytes) -> None:
+    suffix = Path(filename).suffix.lower()
+    if suffix == '.epub':
+        _validate_epub_bytes(raw)
+    elif suffix == '.pdf':
+        _validate_pdf_bytes(raw)
 
 
 class UploadService:
@@ -121,6 +156,7 @@ class UploadService:
         if not raw:
             raise ValueError('上传文件不能为空')
         safe_name = safe_filename(filename, 'upload.bin')
+        validate_upload_bytes(safe_name, raw)
         upload_id = f'upload_{uuid.uuid4().hex[:16]}'
         created_at = now_iso()
         upload_dir = self._upload_dir(upload_id)

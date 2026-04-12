@@ -175,11 +175,14 @@ def create_app(settings: HttpSettings | None = None) -> FastAPI:
         limit = int(settings.upload_max_mb * 1024 * 1024)
         if len(data) > limit:
             raise HTTPException(status_code=413, detail=f"Uploaded file exceeds {settings.upload_max_mb:.0f} MB limit")
-        result = _ctx().uploads.accept_bytes(
-            filename=file.filename or "upload.bin",
-            content=data,
-            content_type=file.content_type or "",
-        )
+        try:
+            result = _ctx().uploads.accept_bytes(
+                filename=file.filename or "upload.bin",
+                content=data,
+                content_type=file.content_type or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         upload = result["upload"]
         result["next_step"] = {
             "tool": upload["recommended_tool"],

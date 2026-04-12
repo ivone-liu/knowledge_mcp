@@ -539,6 +539,7 @@ MCP 路径默认是：
 3. 再让 ChatGPT 调 `articles.ingest_pdf` / `articles.ingest_epub` / `articles.ingest_txt`，参数里只传 `upload_id`
 
 这样 ChatGPT 不需要知道服务器本地目录，也不需要把整个文件转成超长 Base64。
+如果上传的 PDF / EPUB 不是完整原始字节，服务会在上传阶段直接拒绝，而不是等到 job 阶段才报解析失败。
 
 如果你的客户端还不支持把聊天附件直接映射到 MCP 的 Base64 参数，再退回 HTTP 上传：
 
